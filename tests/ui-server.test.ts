@@ -71,6 +71,21 @@ describe("local dashboard server", () => {
 
     const authorized = await api("/api/stats");
     expect(authorized.status).toBe(200);
+
+    const control = await api("/api/control/status");
+    expect(control.status).toBe(200);
+    expect(await control.json()).toMatchObject({
+      ok: true,
+      instance_id: dashboard.instanceId,
+      pid: process.pid
+    });
+
+    const foregroundStop = await api("/api/control/stop", { method: "POST" });
+    expect(foregroundStop.status).toBe(409);
+    expect(await foregroundStop.json()).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/foreground mode/i)
+    });
     expect(await authorized.json()).toMatchObject({
       ok: true,
       message_count: 0,

@@ -10,6 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const temporaryRoot = await mkdtemp(path.join(tmpdir(), "agent-lounge-package-test-"));
 let tarballPath;
+let cleanupCli;
 
 try {
   const pack = run(
@@ -43,6 +44,8 @@ try {
   }
 
   const common = ["--home", board, "--project-root", project, "--json"];
+  cleanupCli = () =>
+    run(cliCommand, [...cliPrefix, ...common, "ui", "stop", "--force"], temporaryRoot);
   const initialized = JSON.parse(
     run(cliCommand, [...cliPrefix, ...common, "init"], temporaryRoot).stdout
   );
@@ -88,6 +91,42 @@ try {
     throw new Error("packed post/list round trip did not preserve the message");
   }
 
+  const started = JSON.parse(
+    run(cliCommand, [...cliPrefix, ...common, "ui", "--port", "0", "--no-open"], temporaryRoot)
+      .stdout
+  );
+  const status = JSON.parse(
+    run(cliCommand, [...cliPrefix, ...common, "ui", "status"], temporaryRoot).stdout
+  );
+  if (
+    !started.running ||
+    started.reused ||
+    !Number.isInteger(started.pid) ||
+    status.pid !== started.pid ||
+    status.port !== started.port
+  ) {
+    throw new Error("packed dashboard did not start and report its managed process");
+  }
+  const restarted = JSON.parse(
+    run(
+      cliCommand,
+      [...cliPrefix, ...common, "ui", "restart", "--port", "0", "--no-open"],
+      temporaryRoot
+    ).stdout
+  );
+  if (!restarted.running || restarted.pid === started.pid || !Number.isInteger(restarted.port)) {
+    throw new Error("packed dashboard did not restart with a fresh managed process");
+  }
+  const stopped = JSON.parse(
+    run(cliCommand, [...cliPrefix, ...common, "ui", "stop"], temporaryRoot).stdout
+  );
+  const stoppedStatus = JSON.parse(
+    run(cliCommand, [...cliPrefix, ...common, "ui", "status"], temporaryRoot).stdout
+  );
+  if (!stopped.stopped || !stopped.was_running || stoppedStatus.running) {
+    throw new Error("packed dashboard did not stop cleanly");
+  }
+
   const mcpClient = new Client({ name: "package-test", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: process.platform === "win32" ? process.execPath : executable,
@@ -118,6 +157,11 @@ try {
 
   console.log(`Clean tarball install passed for agent-lounge@${version.stdout.trim()}.`);
 } finally {
+  try {
+    cleanupCli?.();
+  } catch {
+    // Best-effort cleanup; the primary package-test failure remains authoritative.
+  }
   await rm(temporaryRoot, { recursive: true, force: true });
   if (tarballPath) await rm(tarballPath, { force: true });
 }

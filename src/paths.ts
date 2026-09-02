@@ -12,6 +12,8 @@ export interface StorePaths {
   sentinel: string;
   rules: string;
   installState: string;
+  uiState: string;
+  uiLog: string;
   personalBoard: string;
   projectsRoot: string;
   trashRoot: string;
@@ -37,6 +39,8 @@ export function getStorePaths(home: string): StorePaths {
     sentinel: path.join(resolved, STORE_SENTINEL),
     rules: path.join(resolved, RULES_FILE_NAME),
     installState: path.join(resolved, "install-state.json"),
+    uiState: path.join(resolved, "ui-state.json"),
+    uiLog: path.join(resolved, "ui.log"),
     personalBoard: path.join(resolved, "v1", "boards", "personal"),
     projectsRoot: path.join(resolved, "v1", "boards", "projects"),
     trashRoot: path.join(resolved, "v1", "trash")

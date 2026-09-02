@@ -3,10 +3,16 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { fileURLToPath } from "node:url";
 import { Command, CommanderError, Option } from "commander";
 import pc from "picocolors";
 
-import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PACKAGE_NAME } from "./constants.js";
+import {
+  DASHBOARD_DEFAULT_PORT,
+  DEFAULT_PAGE_LIMIT,
+  MAX_PAGE_LIMIT,
+  PACKAGE_NAME
+} from "./constants.js";
 import {
   formatMessage,
   formatPage,
@@ -46,6 +52,14 @@ import {
 import { AgentLoungeStore } from "./storage.js";
 import { runSetupWizard } from "./setup-wizard.js";
 import { startDashboard } from "./ui-server.js";
+import {
+  getManagedUiStatus,
+  serveManagedUi,
+  startManagedUi,
+  stopManagedUi,
+  type ManagedUiStatus,
+  type StartManagedUiResult
+} from "./ui-process.js";
 import { VERSION } from "./version.js";
 
 interface GlobalOptions {
@@ -88,6 +102,11 @@ interface InstallCommandOptions extends SetupOptions {
   dryRun?: boolean;
   force?: boolean;
   reconfigure?: boolean;
+}
+
+interface UiStartOptions {
+  port: number;
+  open: boolean;
 }
 
 export async function main(argv: string[] = process.argv): Promise<void> {
@@ -305,6 +324,7 @@ function buildProgram(): Command {
           force: options.force ?? false
         });
         if (options.purge && !options.dryRun) {
+          await stopManagedUi(globals.home, { force: true });
           await makeStore(globals, "human").purgeStore();
         }
         emitInstallReport(command, report, options.purge ? "Store purged." : undefined);
@@ -459,27 +479,72 @@ function buildProgram(): Command {
       );
     });
 
-  program
-    .command("ui")
-    .description("open the optional local dashboard")
-    .option("--port <port>", "loopback port; use 0 for a random available port", parsePort, 47_831)
-    .option("--no-open", "do not open the browser automatically")
-    .action(async (options: { port: number; open: boolean }, command: Command) => {
+  const ui = addUiStartOptions(
+    program.command("ui").description("open and manage the optional local dashboard")
+  );
+  ui.action(runUiStartAction);
+  addUiStartOptions(
+    ui.command("start").description("start or reopen the managed dashboard")
+  ).action(runUiStartAction);
+  ui.command("stop")
+    .description("stop the managed dashboard")
+    .option("--force", "force termination if graceful shutdown fails")
+    .action(async (_options, command: Command) => {
       const globals = globalOptions(command);
-      const dashboard = await startDashboard({
+      const options = command.optsWithGlobals<{ force?: boolean }>();
+      const result = await stopManagedUi(globals.home, { force: options.force ?? false });
+      const green = globals.color ? pc.green : (value: string) => value;
+      emit(
+        command,
+        { ok: true, ...result },
+        `${result.was_running ? green("Agent Lounge UI stopped.") : "Agent Lounge UI is already stopped."}${result.forced ? " Forced termination was required." : ""}${result.warning ? `\nwarning · ${terminalSafe(result.warning)}` : ""}`
+      );
+    });
+  addUiStartOptions(
+    ui.command("restart").description("stop and restart the managed dashboard")
+  ).action(async (_options, command: Command) => {
+    const globals = globalOptions(command);
+    const options = command.optsWithGlobals<UiStartOptions>();
+    await stopManagedUi(globals.home, { force: true });
+    const result = await startUi(globals, options);
+    emitUiStart(command, { ...result, reused: false }, "restarted");
+  });
+  ui.command("status")
+    .description("show whether the managed dashboard is running")
+    .action(async (_options, command: Command) => {
+      const status = await getManagedUiStatus(globalOptions(command).home);
+      emitUiStatus(command, status);
+      if (status.state === "unresponsive") process.exitCode = 1;
+    });
+  addUiStartOptions(
+    ui.command("foreground").description("run the dashboard in this terminal for debugging")
+  ).action(async (_options, command: Command) => {
+    const globals = globalOptions(command);
+    const options = command.optsWithGlobals<UiStartOptions>();
+    const dashboard = await startDashboard({
+      store: makeStore(globals, "dashboard"),
+      port: options.port,
+      openBrowser: options.open
+    });
+    emit(
+      command,
+      { ok: true, mode: "foreground", url: dashboard.url, port: dashboard.port },
+      `${globals.color ? pc.bold("Agent Lounge UI") : "Agent Lounge UI"} · ${dashboard.url}\nPress Ctrl+C to stop this foreground dashboard.`
+    );
+  });
+
+  program
+    .command("__ui-serve", { hidden: true })
+    .requiredOption("--port <port>", "loopback port", parsePort)
+    .requiredOption("--instance-id <id>", "managed process identity")
+    .action(async (_options, command: Command) => {
+      const globals = globalOptions(command);
+      const options = command.optsWithGlobals<{ port: number; instanceId: string }>();
+      await serveManagedUi({
         store: makeStore(globals, "dashboard"),
         port: options.port,
-        openBrowser: options.open
+        instanceId: options.instanceId
       });
-      if (globals.json)
-        output.write(jsonString({ ok: true, url: dashboard.url, port: dashboard.port }));
-      else {
-        const bold = globals.color ? pc.bold : (value: string) => value;
-        const dim = globals.color ? pc.dim : (value: string) => value;
-        output.write(
-          `${bold("Agent Lounge")} · ${dashboard.url}\n${dim("Press Ctrl+C to stop the dashboard. Agents continue working without it.")}\n`
-        );
-      }
     });
 
   program
@@ -504,6 +569,62 @@ function addListOptions(command: Command): Command {
     .option("--limit <count>", `1-${MAX_PAGE_LIMIT}`, String(DEFAULT_PAGE_LIMIT))
     .option("--offset <count>", "pagination offset", "0")
     .option("--include-hidden", "include human-hidden messages");
+}
+
+function addUiStartOptions(command: Command): Command {
+  return command
+    .option(
+      "--port <port>",
+      "loopback port; use 0 for a random available port",
+      parsePort,
+      DASHBOARD_DEFAULT_PORT
+    )
+    .option("--no-open", "do not open the browser automatically");
+}
+
+async function runUiStartAction(_options: unknown, command: Command): Promise<void> {
+  const options = command.optsWithGlobals<UiStartOptions>();
+  const result = await startUi(globalOptions(command), options);
+  emitUiStart(command, result, result.reused ? "already running" : "started");
+}
+
+function startUi(globals: GlobalOptions, options: UiStartOptions): Promise<StartManagedUiResult> {
+  const cliPath = fileURLToPath(import.meta.url);
+  return startManagedUi({
+    store: makeStore(globals, "dashboard"),
+    port: options.port,
+    openBrowser: options.open,
+    cliPath,
+    nodeArgs: cliPath.endsWith(".ts") ? ["--import", "tsx"] : []
+  });
+}
+
+function emitUiStart(command: Command, result: StartManagedUiResult, verb: string): void {
+  const warning = result.warning ? `\nwarning · ${terminalSafe(result.warning)}` : "";
+  const title = globalOptions(command).color ? pc.bold("Agent Lounge UI") : "Agent Lounge UI";
+  emit(
+    command,
+    { ok: true, ...result },
+    `${title} ${verb} in the background · ${terminalSafe(result.url ?? "")}
+PID ${result.pid ?? "unknown"} · port ${result.port ?? "unknown"}
+Stop: npx -y ${PACKAGE_NAME}@latest ui stop
+Restart: npx -y ${PACKAGE_NAME}@latest ui restart${warning}`
+  );
+}
+
+function emitUiStatus(command: Command, status: ManagedUiStatus): void {
+  const color = globalOptions(command).color;
+  const message =
+    status.state === "running"
+      ? `${color ? pc.green("Agent Lounge UI is running.") : "Agent Lounge UI is running."} PID ${status.pid} · port ${status.port}`
+      : status.state === "unresponsive"
+        ? `${color ? pc.yellow("Agent Lounge UI is unresponsive.") : "Agent Lounge UI is unresponsive."} Run \`npx -y ${PACKAGE_NAME}@latest ui restart\`.`
+        : "Agent Lounge UI is stopped.";
+  emit(
+    command,
+    { ok: status.state !== "unresponsive", ...status },
+    `${message}${status.warning ? `\nwarning · ${terminalSafe(status.warning)}` : ""}`
+  );
 }
 
 function queryFromListOptions(options: ListOptions) {

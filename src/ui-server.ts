@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -32,25 +32,33 @@ export interface StartDashboardOptions {
   store: AgentLoungeStore;
   port: number;
   openBrowser: boolean;
+  accessToken?: string;
+  instanceId?: string;
+  onStopRequested?: () => void;
 }
 
 export interface DashboardHandle {
   url: string;
   port: number;
+  token: string;
+  instanceId: string;
   close(): Promise<void>;
 }
 
 export async function startDashboard(options: StartDashboardOptions): Promise<DashboardHandle> {
   await options.store.initialize();
   const assets = await loadAssets();
-  const token = randomBytes(24).toString("base64url");
+  const token = options.accessToken ?? randomBytes(24).toString("base64url");
+  const instanceId = options.instanceId ?? randomUUID();
   let actualPort = options.port;
   const server = createServer((request, response) => {
     void handleRequest(request, response, {
       store: options.store,
       assets,
       token,
-      port: actualPort
+      port: actualPort,
+      instanceId,
+      ...(options.onStopRequested ? { onStopRequested: options.onStopRequested } : {})
     });
   });
   server.headersTimeout = 5_000;
@@ -72,10 +80,12 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
   });
 
   const url = `http://localhost:${actualPort}/#token=${token}`;
-  if (options.openBrowser) openBrowser(url);
+  if (options.openBrowser) openDashboardBrowser(url);
   return {
     url,
     port: actualPort,
+    token,
+    instanceId,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
@@ -86,7 +96,14 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  context: { store: AgentLoungeStore; assets: DashboardAssets; token: string; port: number }
+  context: {
+    store: AgentLoungeStore;
+    assets: DashboardAssets;
+    token: string;
+    port: number;
+    instanceId: string;
+    onStopRequested?: () => void;
+  }
 ): Promise<void> {
   setSecurityHeaders(response);
   try {
@@ -105,6 +122,30 @@ async function handleRequest(
           ok: false,
           error: "Dashboard access token is missing or invalid."
         });
+        return;
+      }
+      if (url.pathname === "/api/control/status" && request.method === "GET") {
+        sendJson(response, 200, {
+          ok: true,
+          instance_id: context.instanceId,
+          pid: process.pid
+        });
+        return;
+      }
+      if (url.pathname === "/api/control/stop" && request.method === "POST") {
+        if (!context.onStopRequested) {
+          sendJson(response, 409, {
+            ok: false,
+            error: "This dashboard is running in foreground mode. Press Ctrl+C to stop it."
+          });
+          return;
+        }
+        sendJson(response, 200, {
+          ok: true,
+          instance_id: context.instanceId,
+          pid: process.pid
+        });
+        setImmediate(context.onStopRequested);
         return;
       }
       await handleApi(request, response, url, context.store);
@@ -346,7 +387,7 @@ function parseInteger(
   return parsed;
 }
 
-function openBrowser(url: string): void {
+export function openDashboardBrowser(url: string): void {
   const command =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];

@@ -8,6 +8,7 @@ import {
   assertSafePurgeTarget,
   boardRootFor,
   compactTimestamp,
+  defaultStoreHome,
   getStorePaths,
   legacyStoreHome,
   projectRootFromEnvironment,
@@ -28,6 +29,8 @@ describe("store paths", () => {
     expect(paths.home).toBe(path.join(root, "board"));
     expect(paths.personalBoard).toContain(path.join("v1", "boards", "personal"));
     expect(paths.trashRoot).toContain(path.join("v1", "trash"));
+    expect(paths.uiState).toBe(path.join(home, "ui-state.json"));
+    expect(paths.uiLog).toBe(path.join(home, "ui.log"));
   });
 
   it("supports current and legacy environment overrides plus home expansion", async () => {
@@ -40,6 +43,8 @@ describe("store paths", () => {
     };
     try {
       delete process.env.AGENT_LOUNGE_HOME;
+      delete process.env.AGENT_BOARD_HOME;
+      expect(resolveStoreHome()).toBe(defaultStoreHome());
       process.env.AGENT_BOARD_HOME = "~/legacy-lounge";
       expect(resolveStoreHome()).toBe(path.join(homedir(), "legacy-lounge"));
       process.env.AGENT_LOUNGE_HOME = "~/current-lounge";

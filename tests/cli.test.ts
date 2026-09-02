@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -17,7 +19,10 @@ beforeEach(async () => {
   projectRoot = await temporaryProject("cli-project");
 });
 
-afterEach(cleanupTemporaryDirectories);
+afterEach(async () => {
+  await runCli(["--json", "ui", "stop", "--force"]);
+  await cleanupTemporaryDirectories();
+});
 
 describe("agent-lounge CLI", () => {
   it("offers concise help and stable JSON initialization and diagnostics", async () => {
@@ -32,6 +37,14 @@ describe("agent-lounge CLI", () => {
     expect(help.stdout).toContain("setup");
     expect(help.stdout).toContain("rules");
     expect(help.stdout).toContain("ui");
+
+    const uiHelp = await runCli(["ui", "--help"]);
+    expect(uiHelp.code).toBe(0);
+    expect(uiHelp.stdout).toContain("start");
+    expect(uiHelp.stdout).toContain("stop");
+    expect(uiHelp.stdout).toContain("restart");
+    expect(uiHelp.stdout).toContain("status");
+    expect(uiHelp.stdout).toContain("foreground");
 
     const before = await runJson(["doctor"]);
     expect(before.result.code).toBe(1);
@@ -186,6 +199,92 @@ describe("agent-lounge CLI", () => {
     expect(page.total).toBe(24);
     expect(new Set(page.items.map((item) => item.message.id)).size).toBe(24);
   });
+
+  it("starts, reopens, restarts, reports, and stops a managed background dashboard", async () => {
+    const started = await runJson(["ui", "--port", "0", "--no-open"]);
+    expect(started.result.code).toBe(0);
+    const first = started.json as {
+      state: string;
+      running: boolean;
+      pid: number;
+      port: number;
+      url: string;
+      reused: boolean;
+    };
+    expect(first).toMatchObject({ state: "running", running: true, reused: false });
+    expect(first.pid).toBeGreaterThan(0);
+    expect(first.port).toBeGreaterThan(0);
+    expect((await fetch(new URL(first.url).origin)).status).toBe(200);
+
+    const status = await runJson(["ui", "status"]);
+    expect(status.json).toMatchObject({
+      state: "running",
+      running: true,
+      pid: first.pid,
+      port: first.port
+    });
+
+    const reopened = await runJson(["ui", "start", "--port", "0", "--no-open"]);
+    expect(reopened.json).toMatchObject({ pid: first.pid, port: first.port, reused: true });
+
+    const restarted = await runJson(["ui", "restart", "--port", "0", "--no-open"]);
+    const second = restarted.json as { pid: number; port: number; state: string; reused: boolean };
+    expect(second).toMatchObject({ state: "running", reused: false });
+    expect(second.pid).not.toBe(first.pid);
+    expect(second.port).toBeGreaterThan(0);
+
+    const stopped = await runJson(["ui", "stop"]);
+    expect(stopped.json).toMatchObject({
+      ok: true,
+      stopped: true,
+      was_running: true,
+      forced: false
+    });
+    expect((await runJson(["ui", "status"])).json).toMatchObject({
+      state: "stopped",
+      running: false
+    });
+  });
+
+  it("removes stale UI state without killing an unrelated process", async () => {
+    await mkdir(home, { recursive: true });
+    await writeFile(
+      path.join(home, "ui-state.json"),
+      `${JSON.stringify({
+        schema_version: 1,
+        instance_id: randomUUID(),
+        pid: process.pid,
+        port: 65_535,
+        token: "x".repeat(32),
+        started_at: new Date().toISOString(),
+        package_version: VERSION
+      })}\n`,
+      "utf8"
+    );
+
+    const status = await runJson(["ui", "status"]);
+    expect(status.result.code).toBe(0);
+    expect(status.json).toMatchObject({
+      state: "stopped",
+      running: false,
+      warning: expect.stringMatching(/stale dashboard state/i)
+    });
+    expect(process.kill(process.pid, 0)).toBe(true);
+  });
+
+  it("stops the managed dashboard before permanently purging its store", async () => {
+    const started = await runJson(["ui", "--port", "0", "--no-open"]);
+    const pid = (started.json as { pid: number }).pid;
+
+    const purged = await runJson(["uninstall", "--purge", "--yes"]);
+    expect(purged.result.code).toBe(0);
+    expect(JSON.stringify(purged.json)).toContain("purged");
+    await expectProcessToExit(pid);
+    expect((await runJson(["ui", "status"])).json).toMatchObject({
+      state: "stopped",
+      running: false
+    });
+  });
 });
 
 async function runJson(args: string[]) {
@@ -224,4 +323,17 @@ function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr:
     child.once("error", reject);
     child.once("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
   });
+}
+
+async function expectProcessToExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(() => process.kill(pid, 0)).toThrow();
 }
