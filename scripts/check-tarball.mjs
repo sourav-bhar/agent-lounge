@@ -31,6 +31,8 @@ try {
     process.platform === "win32" ? "agent-board.cmd" : "agent-board"
   );
   const installedScript = path.join(prefix, "node_modules", "agent-board", "dist", "cli.js");
+  const cliCommand = process.platform === "win32" ? process.execPath : executable;
+  const cliPrefix = process.platform === "win32" ? [installedScript] : [];
   const board = path.join(temporaryRoot, "board");
   const project = path.join(temporaryRoot, "project");
   await mkdir(project, { recursive: true });
@@ -41,15 +43,18 @@ try {
   }
 
   const common = ["--home", board, "--project-root", project, "--json"];
-  const initialized = JSON.parse(run(executable, [...common, "init"], temporaryRoot).stdout);
+  const initialized = JSON.parse(
+    run(cliCommand, [...cliPrefix, ...common, "init"], temporaryRoot).stdout
+  );
   if (!initialized.ok || initialized.home !== board) {
     throw new Error("packed init command returned an unexpected result");
   }
 
   const posted = JSON.parse(
     run(
-      executable,
+      cliCommand,
       [
+        ...cliPrefix,
         ...common,
         "messages",
         "post",
@@ -72,7 +77,8 @@ try {
     ).stdout
   );
   const listed = JSON.parse(
-    run(executable, [...common, "messages", "list", "--scope", "all"], temporaryRoot).stdout
+    run(cliCommand, [...cliPrefix, ...common, "messages", "list", "--scope", "all"], temporaryRoot)
+      .stdout
   );
   if (
     !posted.message?.id ||
@@ -122,7 +128,7 @@ function run(command, args, cwd) {
     encoding: "utf8",
     env: { ...process.env, NO_COLOR: "1", npm_config_dry_run: "false" },
     maxBuffer: 2_000_000,
-    shell: process.platform === "win32"
+    shell: process.platform === "win32" && command.toLowerCase().endsWith(".cmd")
   });
   if (result.status !== 0) {
     throw new Error(
