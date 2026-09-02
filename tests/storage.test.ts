@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -40,6 +40,121 @@ describe("AgentLoungeStore", () => {
     await expect(stat(legacyHome)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await migrateLegacyStoreDirectory(legacyHome, loungeHome)).toBe(false);
   });
+
+  it("merges a legacy store when a current Lounge already exists without deleting the safety copy", async () => {
+    const parent = await temporaryDirectory("coexisting-stores");
+    const legacyHome = path.join(parent, ".agent-board");
+    const loungeHome = path.join(parent, ".agent-lounge");
+    const projectRoot = await temporaryProject("coexisting-project");
+    const legacyStore = new AgentLoungeStore({ home: legacyHome, projectRoot });
+    const loungeStore = new AgentLoungeStore({ home: loungeHome, projectRoot });
+    const message = await legacyStore.post(
+      messageInput({ scope: "project", topic: "Do not strand this lesson" })
+    );
+    await legacyStore.setCuration(message.id, "pinned", "Still useful");
+    await loungeStore.initialize();
+
+    expect(await migrateLegacyStoreDirectory(legacyHome, loungeHome)).toBe(true);
+    expect((await loungeStore.get(message.id))?.message.topic).toBe("Do not strand this lesson");
+    expect((await loungeStore.get(message.id))?.curation?.state).toBe("pinned");
+    expect(await stat(legacyHome)).toBeTruthy();
+    expect(await migrateLegacyStoreDirectory(legacyHome, loungeHome)).toBe(false);
+  });
+
+  it("refuses to overwrite different files while merging coexisting stores", async () => {
+    const parent = await temporaryDirectory("coexisting-conflict");
+    const legacyHome = path.join(parent, ".agent-board");
+    const loungeHome = path.join(parent, ".agent-lounge");
+    const legacyStore = new AgentLoungeStore({
+      home: legacyHome,
+      projectRoot: await temporaryProject("conflict-project")
+    });
+    const message = await legacyStore.post(messageInput({ topic: "Original lesson" }));
+    const legacyMessagePath = (await messageFiles(legacyHome))[0]!;
+    const conflictingPath = path.join(loungeHome, path.relative(legacyHome, legacyMessagePath));
+    await mkdir(path.dirname(conflictingPath), { recursive: true });
+    await writeFile(conflictingPath, "different\n", "utf8");
+
+    await expect(migrateLegacyStoreDirectory(legacyHome, loungeHome)).rejects.toThrow(
+      /refusing to overwrite different/i
+    );
+    expect(await readFile(conflictingPath, "utf8")).toBe("different\n");
+    expect((await legacyStore.get(message.id))?.message.topic).toBe("Original lesson");
+  });
+
+  it("does nothing when the legacy path is the current store or has no durable data", async () => {
+    const parent = await temporaryDirectory("legacy-no-data");
+    const emptyLegacyHome = path.join(parent, ".agent-board");
+    const loungeHome = path.join(parent, ".agent-lounge");
+    await mkdir(emptyLegacyHome, { recursive: true });
+    await mkdir(loungeHome, { recursive: true });
+
+    expect(await migrateLegacyStoreDirectory(loungeHome, loungeHome)).toBe(false);
+    expect(await migrateLegacyStoreDirectory(emptyLegacyHome, loungeHome)).toBe(false);
+  });
+
+  it("refuses a file-versus-directory collision while merging legacy data", async () => {
+    const parent = await temporaryDirectory("legacy-directory-conflict");
+    const legacyHome = path.join(parent, ".agent-board");
+    const loungeHome = path.join(parent, ".agent-lounge");
+    const legacyStore = new AgentLoungeStore({
+      home: legacyHome,
+      projectRoot: await temporaryProject("directory-conflict-project")
+    });
+    await legacyStore.post(messageInput({ topic: "Keep this file" }));
+    const legacyMessagePath = (await messageFiles(legacyHome))[0]!;
+    const conflictingPath = path.join(loungeHome, path.relative(legacyHome, legacyMessagePath));
+    await mkdir(conflictingPath, { recursive: true });
+
+    await expect(migrateLegacyStoreDirectory(legacyHome, loungeHome)).rejects.toThrow(
+      /refusing to overwrite different/i
+    );
+    expect((await stat(conflictingPath)).isDirectory()).toBe(true);
+  });
+
+  it("refuses a directory-versus-file collision while merging legacy data", async () => {
+    const parent = await temporaryDirectory("legacy-parent-conflict");
+    const legacyHome = path.join(parent, ".agent-board");
+    const loungeHome = path.join(parent, ".agent-lounge");
+    await mkdir(path.join(legacyHome, "v1", "boards"), { recursive: true });
+    await mkdir(path.join(loungeHome, "v1"), { recursive: true });
+    await writeFile(path.join(loungeHome, "v1", "boards"), "different\n", "utf8");
+
+    await expect(migrateLegacyStoreDirectory(legacyHome, loungeHome)).rejects.toThrow(
+      /refusing to overwrite different/i
+    );
+    expect(await readFile(path.join(loungeHome, "v1", "boards"), "utf8")).toBe("different\n");
+  });
+
+  it("refuses a legacy data root that is not a directory", async () => {
+    const parent = await temporaryDirectory("legacy-root-file");
+    const legacyHome = path.join(parent, ".agent-board");
+    const loungeHome = path.join(parent, ".agent-lounge");
+    await mkdir(legacyHome, { recursive: true });
+    await mkdir(loungeHome, { recursive: true });
+    await writeFile(path.join(legacyHome, "v1"), "not-a-directory\n", "utf8");
+
+    await expect(migrateLegacyStoreDirectory(legacyHome, loungeHome)).rejects.toThrow(
+      /not a directory/i
+    );
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "rejects symbolic links while merging legacy data",
+    async () => {
+      const parent = await temporaryDirectory("legacy-symlink");
+      const legacyHome = path.join(parent, ".agent-board");
+      const loungeHome = path.join(parent, ".agent-lounge");
+      const legacyData = path.join(legacyHome, "v1");
+      await mkdir(legacyData, { recursive: true });
+      await mkdir(loungeHome, { recursive: true });
+      await symlink(path.join(parent, "outside"), path.join(legacyData, "linked-data"));
+
+      await expect(migrateLegacyStoreDirectory(legacyHome, loungeHome)).rejects.toThrow(
+        /unsupported symbolic link/i
+      );
+    }
+  );
 
   it("creates a private, inspectable file store", async () => {
     const home = path.join(await temporaryDirectory("private"), "board");

@@ -1,5 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, rm, stat, unlink } from "node:fs/promises";
+import {
+  constants as fsConstants,
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink
+} from "node:fs/promises";
 import path from "node:path";
 
 import { STORE_SCHEMA_VERSION } from "./constants.js";
@@ -79,7 +89,13 @@ export async function migrateLegacyStoreDirectory(
 ): Promise<boolean> {
   const source = path.resolve(legacyHome);
   const target = path.resolve(loungeHome);
-  if (source === target || (await pathExists(target)) || !(await pathExists(source))) return false;
+  if (source === target || !(await pathExists(source))) return false;
+  if (await pathExists(target)) {
+    return mergeLegacyDataDirectory(
+      path.join(source, `v${STORE_SCHEMA_VERSION}`),
+      path.join(target, `v${STORE_SCHEMA_VERSION}`)
+    );
+  }
   try {
     await rename(source, target);
     return true;
@@ -92,6 +108,128 @@ export async function migrateLegacyStoreDirectory(
     }
     throw error;
   }
+}
+
+interface LegacyMergeFile {
+  source: string;
+  target: string;
+  relative: string;
+  needsCopy: boolean;
+}
+
+interface LegacyMergePlan {
+  directoriesToCreate: string[];
+  files: LegacyMergeFile[];
+}
+
+async function mergeLegacyDataDirectory(source: string, target: string): Promise<boolean> {
+  const sourceKind = await pathKind(source);
+  if (sourceKind === null) return false;
+  if (sourceKind !== "directory") {
+    throw new Error("Legacy Agent Board data is not a directory. Both stores were preserved.");
+  }
+
+  const plan = await planLegacyDataMerge(source, target);
+  for (const directory of plan.directoriesToCreate) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+  }
+  for (const file of plan.files.filter((candidate) => candidate.needsCopy)) {
+    try {
+      await copyFile(file.source, file.target, fsConstants.COPYFILE_EXCL);
+    } catch (error) {
+      if (!isNodeError(error, "EEXIST")) throw error;
+    }
+  }
+  for (const file of plan.files) {
+    if (!(await filesMatch(file.source, file.target))) {
+      throw legacyMergeConflict(file.relative);
+    }
+  }
+
+  return plan.directoriesToCreate.length > 0 || plan.files.some((candidate) => candidate.needsCopy);
+}
+
+async function planLegacyDataMerge(source: string, target: string): Promise<LegacyMergePlan> {
+  const directoriesToCreate: string[] = [];
+  const files: LegacyMergeFile[] = [];
+
+  const walk = async (sourceDirectory: string, targetDirectory: string): Promise<void> => {
+    const targetKind = await pathKind(targetDirectory);
+    if (targetKind !== null && targetKind !== "directory") {
+      throw legacyMergeConflict(path.relative(target, targetDirectory));
+    }
+    if (targetKind === null) directoriesToCreate.push(targetDirectory);
+
+    const entries = (await safeReadDirectory(sourceDirectory)).sort((left, right) =>
+      left.name.localeCompare(right.name)
+    );
+    for (const entry of entries) {
+      const sourcePath = path.join(sourceDirectory, entry.name);
+      const targetPath = path.join(targetDirectory, entry.name);
+      const relative = path.relative(source, sourcePath);
+      if (entry.isSymbolicLink()) {
+        throw new Error(
+          `Legacy Agent Board data contains an unsupported symbolic link at ${relative}. Both stores were preserved.`
+        );
+      }
+      if (entry.isDirectory()) {
+        await walk(sourcePath, targetPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        throw new Error(
+          `Legacy Agent Board data contains an unsupported entry at ${relative}. Both stores were preserved.`
+        );
+      }
+
+      const existingKind = await pathKind(targetPath);
+      if (existingKind !== null && existingKind !== "file") throw legacyMergeConflict(relative);
+      if (existingKind === "file" && !(await filesMatch(sourcePath, targetPath))) {
+        throw legacyMergeConflict(relative);
+      }
+      files.push({
+        source: sourcePath,
+        target: targetPath,
+        relative,
+        needsCopy: existingKind === null
+      });
+    }
+  };
+
+  await walk(source, target);
+  return { directoriesToCreate, files };
+}
+
+async function filesMatch(first: string, second: string): Promise<boolean> {
+  try {
+    const [firstContents, secondContents] = await Promise.all([readFile(first), readFile(second)]);
+    return firstContents.equals(secondContents);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
+async function pathKind(
+  target: string
+): Promise<"directory" | "file" | "other" | "symlink" | null> {
+  try {
+    const metadata = await lstat(target);
+    if (metadata.isSymbolicLink()) return "symlink";
+    if (metadata.isDirectory()) return "directory";
+    if (metadata.isFile()) return "file";
+    return "other";
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return null;
+    throw error;
+  }
+}
+
+function legacyMergeConflict(relative: string): Error {
+  const displayPath = relative.split(path.sep).join("/") || ".";
+  return new Error(
+    `Refusing to overwrite different Agent Lounge data at ${displayPath}. Both stores were preserved.`
+  );
 }
 
 export class AgentLoungeStore {
@@ -109,11 +247,7 @@ export class AgentLoungeStore {
       ),
       run_id: options.runId ?? randomUUID()
     };
-    this.migrateLegacyDefault =
-      options.home === undefined &&
-      process.env.AGENT_LOUNGE_HOME === undefined &&
-      process.env.AGENT_BOARD_HOME === undefined &&
-      this.paths.home === defaultStoreHome();
+    this.migrateLegacyDefault = this.paths.home === defaultStoreHome();
   }
 
   async initialize(): Promise<void> {

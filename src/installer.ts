@@ -94,6 +94,10 @@ export interface InstallationHealth {
 
 export async function installAgentLounge(options: InstallOptions = {}): Promise<InstallReport> {
   const paths = getStorePaths(resolveStoreHome(options.home));
+  const hasCoexistingLegacyStore =
+    paths.home === defaultStoreHome() &&
+    (await pathExists(paths.home)) &&
+    (await pathExists(legacyStoreHome()));
   const state = await readInstallStateForInstall(paths.home, paths.installState);
   const clients = options.clients ?? detectClients();
   if (clients.length === 0) {
@@ -143,6 +147,13 @@ export async function installAgentLounge(options: InstallOptions = {}): Promise<
   if (!options.dryRun) {
     await new AgentLoungeStore({ home: paths.home, client: "installer" }).initialize();
     if (options.rulesDocument) await writeRulesDocument(options.rulesDocument, paths.home);
+  }
+  if (hasCoexistingLegacyStore) {
+    warnings.push(
+      options.dryRun
+        ? "A legacy Agent Board store also exists. Install will merge non-conflicting durable data and preserve the legacy directory as a safety copy."
+        : "Merged non-conflicting durable data from the legacy Agent Board store and preserved the legacy directory as a safety copy."
+    );
   }
 
   for (const { client, status, legacyStatus, addCommand, skillPath, legacySkillPath } of plans) {

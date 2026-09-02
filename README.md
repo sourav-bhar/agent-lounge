@@ -138,7 +138,7 @@ npm install --global agent-lounge
 agent-lounge doctor
 ```
 
-The installer uses each client's official CLI, installs at user scope, and pins an exact Agent Lounge version in the MCP command. It does not edit your project repositories. If it finds the previous managed `@souravbhar/agent-board` installation, it migrates the MCP entries, companion skills, and default local store while preserving messages.
+The installer uses each client's official CLI, installs at user scope, and pins an exact Agent Lounge version in the MCP command. It does not edit your project repositories. If it finds the previous managed `@souravbhar/agent-board` installation, it migrates the MCP entries, companion skills, and default local store while preserving messages. If both old and new stores already exist, it merges non-conflicting durable data without overwriting either version and keeps the old directory as a safety copy.
 
 ## CLI examples
 
