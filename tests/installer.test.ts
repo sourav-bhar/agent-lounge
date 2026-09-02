@@ -159,17 +159,30 @@ describe("agent client installer", () => {
 
   it("migrates managed Agent Board MCP entries and companion skills in place", async () => {
     await writeFakeState("codex", "legacy-managed", "agent-board");
-    const legacySkillPath = join(codexHome, "skills", "agent-board");
-    await mkdir(legacySkillPath, { recursive: true });
-    await writeFile(
-      join(legacySkillPath, "SKILL.md"),
-      "---\nname: agent-board\n---\n\n<!-- managed-by: agent-board -->\n",
-      "utf8"
-    );
+    await writeFakeState("claude", "legacy-managed", "agent-board");
+    const legacySkillPaths = [
+      join(codexHome, "skills", "agent-board"),
+      join(claudeHome, "skills", "agent-board")
+    ];
+    for (const legacySkillPath of legacySkillPaths) {
+      await mkdir(legacySkillPath, { recursive: true });
+      await writeFile(
+        join(legacySkillPath, "SKILL.md"),
+        "---\nname: agent-board\n---\n\n<!-- managed-by: agent-board -->\n",
+        "utf8"
+      );
+    }
 
-    const report = await installAgentLounge({ home: boardHome, clients: ["codex"] });
+    const report = await installAgentLounge({
+      home: boardHome,
+      clients: ["codex", "claude"]
+    });
 
     expect(report.actions.map((action) => action.action)).toEqual([
+      "migrate_mcp",
+      "add_mcp",
+      "install_skill",
+      "remove_legacy_skill",
       "migrate_mcp",
       "add_mcp",
       "install_skill",
@@ -177,10 +190,17 @@ describe("agent client installer", () => {
     ]);
     expect(await readFakeState("codex", "agent-board")).toBeNull();
     expect(await readFakeState("codex", "agent-lounge")).toBe("managed");
-    await expect(stat(legacySkillPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFakeState("claude", "agent-board")).toBeNull();
+    expect(await readFakeState("claude", "agent-lounge")).toBe("managed");
+    for (const legacySkillPath of legacySkillPaths) {
+      await expect(stat(legacySkillPath)).rejects.toMatchObject({ code: "ENOENT" });
+    }
     expect(await readFile(join(codexHome, "skills", "agent-lounge", "SKILL.md"), "utf8")).toContain(
       "managed-by: agent-lounge"
     );
+    expect(
+      await readFile(join(claudeHome, "skills", "agent-lounge", "SKILL.md"), "utf8")
+    ).toContain("managed-by: agent-lounge");
   });
 
   it("preserves foreign MCP configurations unless force is explicit", async () => {
