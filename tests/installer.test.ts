@@ -157,6 +157,48 @@ describe("agent client installer", () => {
     ]);
   });
 
+  it("updates an exact older Agent Lounge version without requiring force", async () => {
+    process.env.FAKE_PACKAGE_VERSION = "0.2.0";
+    await writeFakeState("codex", "managed");
+    await writeFakeState("claude", "managed");
+
+    const report = await installAgentLounge({
+      home: boardHome,
+      clients: ["codex", "claude"]
+    });
+
+    expect(report.actions.map((action) => action.action)).toEqual([
+      "replace_mcp",
+      "add_mcp",
+      "install_skill",
+      "replace_mcp",
+      "add_mcp",
+      "install_skill"
+    ]);
+    const log = await commandLog();
+    expect(log).toContainEqual({
+      client: "codex",
+      args: expect.arrayContaining([`${PACKAGE_NAME}@${VERSION}`])
+    });
+    expect(log).toContainEqual({
+      client: "claude",
+      args: expect.arrayContaining([`${PACKAGE_NAME}@${VERSION}`])
+    });
+  });
+
+  it("does not treat a mutable package tag as an installer-managed command", async () => {
+    process.env.FAKE_PACKAGE_VERSION = "latest";
+    await writeFakeState("codex", "managed");
+    await writeFakeState("claude", "managed");
+
+    await expect(installAgentLounge({ home: boardHome, clients: ["codex"] })).rejects.toThrow(
+      /different command/i
+    );
+    await expect(installAgentLounge({ home: boardHome, clients: ["claude"] })).rejects.toThrow(
+      /different command/i
+    );
+  });
+
   it("migrates managed Agent Board MCP entries and companion skills in place", async () => {
     await writeFakeState("codex", "legacy-managed", "agent-board");
     await writeFakeState("claude", "legacy-managed", "agent-board");

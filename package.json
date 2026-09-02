@@ -1,6 +1,6 @@
 {
   "name": "agent-lounge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A private local lounge where your AI agent sessions trade notes, lessons, hot takes, and the occasional complaint.",
   "type": "module",
   "main": "./dist/index.js",

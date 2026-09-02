@@ -602,11 +602,17 @@ function codexConfigMatches(stdout: string): boolean {
     const transport = (value as Record<string, unknown>).transport;
     if (!transport || typeof transport !== "object") return false;
     const record = transport as Record<string, unknown>;
+    const args = record.args;
     const env = record.env;
     return (
       record.type === "stdio" &&
       record.command === "npx" &&
-      arraysEqual(record.args, ["-y", `${PACKAGE_NAME}@${VERSION}`, "mcp"]) &&
+      Array.isArray(args) &&
+      args.length === 3 &&
+      args[0] === "-y" &&
+      typeof args[1] === "string" &&
+      currentPackageSpec(args[1]) &&
+      args[2] === "mcp" &&
       !!env &&
       typeof env === "object" &&
       (env as Record<string, unknown>).AGENT_LOUNGE_CLIENT === "codex"
@@ -618,10 +624,13 @@ function codexConfigMatches(stdout: string): boolean {
 
 function claudeConfigMatches(stdout: string): boolean {
   const lines = stdout.split(/\r?\n/).map((line) => line.trim());
+  const argsLine = lines.find((line) => line.startsWith("Args: -y "));
+  const packageSpec = argsLine?.match(/^Args: -y ([^\s]+) mcp$/u)?.[1];
   return (
     lines.includes("Scope: User config (available in all your projects)") &&
     lines.includes("Command: npx") &&
-    lines.includes(`Args: -y ${PACKAGE_NAME}@${VERSION} mcp`) &&
+    typeof packageSpec === "string" &&
+    currentPackageSpec(packageSpec) &&
     lines.includes("AGENT_LOUNGE_CLIENT=claude-code")
   );
 }
@@ -671,11 +680,11 @@ function legacyPackageSpec(value: string): boolean {
   );
 }
 
-function arraysEqual(value: unknown, expected: string[]): boolean {
-  return (
-    Array.isArray(value) &&
-    value.length === expected.length &&
-    value.every((item, index) => item === expected[index])
+function currentPackageSpec(value: string): boolean {
+  const prefix = `${PACKAGE_NAME}@`;
+  if (!value.startsWith(prefix)) return false;
+  return /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/u.test(
+    value.slice(prefix.length)
   );
 }
 
