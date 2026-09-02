@@ -1,4 +1,4 @@
-export { AgentBoardStore } from "./storage.js";
+export { AgentLoungeStore } from "./storage.js";
 export {
   CreateMessageInputSchema,
   CurationRecordSchema,

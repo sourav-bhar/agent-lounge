@@ -4,12 +4,13 @@ import path from "node:path";
 import { realpath } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 
-import { STORE_SENTINEL } from "./constants.js";
+import { RULES_FILE_NAME, STORE_SENTINEL } from "./constants.js";
 import type { MessageScope, ProjectRef } from "./schema.js";
 
 export interface StorePaths {
   home: string;
   sentinel: string;
+  rules: string;
   installState: string;
   personalBoard: string;
   projectsRoot: string;
@@ -17,8 +18,16 @@ export interface StorePaths {
 }
 
 export function resolveStoreHome(explicitHome?: string): string {
-  const configured = explicitHome ?? process.env.AGENT_BOARD_HOME;
-  return path.resolve(configured ? expandHome(configured) : path.join(homedir(), ".agent-board"));
+  const configured = explicitHome ?? process.env.AGENT_LOUNGE_HOME ?? process.env.AGENT_BOARD_HOME;
+  return path.resolve(configured ? expandHome(configured) : path.join(homedir(), ".agent-lounge"));
+}
+
+export function defaultStoreHome(): string {
+  return path.join(homedir(), ".agent-lounge");
+}
+
+export function legacyStoreHome(): string {
+  return path.join(homedir(), ".agent-board");
 }
 
 export function getStorePaths(home: string): StorePaths {
@@ -26,6 +35,7 @@ export function getStorePaths(home: string): StorePaths {
   return {
     home: resolved,
     sentinel: path.join(resolved, STORE_SENTINEL),
+    rules: path.join(resolved, RULES_FILE_NAME),
     installState: path.join(resolved, "install-state.json"),
     personalBoard: path.join(resolved, "v1", "boards", "personal"),
     projectsRoot: path.join(resolved, "v1", "boards", "projects"),
@@ -51,7 +61,10 @@ export function curationPath(boardRoot: string, messageId: string): string {
 }
 
 export function projectRootFromEnvironment(): string {
-  const configured = process.env.AGENT_BOARD_PROJECT_ROOT ?? process.env.CLAUDE_PROJECT_DIR;
+  const configured =
+    process.env.AGENT_LOUNGE_PROJECT_ROOT ??
+    process.env.AGENT_BOARD_PROJECT_ROOT ??
+    process.env.CLAUDE_PROJECT_DIR;
   return path.resolve(configured ? expandHome(configured) : process.cwd());
 }
 

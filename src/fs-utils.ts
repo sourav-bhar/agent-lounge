@@ -13,6 +13,36 @@ export async function atomicWriteJson(target: string, value: unknown): Promise<v
   }
 }
 
+export async function atomicWriteText(target: string, value: string): Promise<void> {
+  const temporary = await writeTemporaryText(target, value);
+  try {
+    await renameWithRetry(temporary, target);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+}
+
+export async function atomicWriteTextIfAbsent(target: string, value: string): Promise<boolean> {
+  const temporary = await writeTemporaryText(target, value);
+  try {
+    await link(temporary, target);
+    return true;
+  } catch (error) {
+    if (
+      (isNodeError(error, "EEXIST") ||
+        isNodeError(error, "EPERM") ||
+        isNodeError(error, "EACCES")) &&
+      (await pathExists(target))
+    ) {
+      return false;
+    }
+    throw error;
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
 export async function atomicWriteJsonIfAbsent(target: string, value: unknown): Promise<boolean> {
   const temporary = await writeTemporaryJson(target, value);
   try {
@@ -67,6 +97,10 @@ export function isNodeError(error: unknown, code: string): error is NodeJS.Errno
 }
 
 async function writeTemporaryJson(target: string, value: unknown): Promise<string> {
+  return writeTemporaryText(target, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function writeTemporaryText(target: string, value: string): Promise<string> {
   await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   const temporary = path.join(
     path.dirname(target),
@@ -75,7 +109,7 @@ async function writeTemporaryJson(target: string, value: unknown): Promise<strin
   const handle = await open(temporary, "wx", 0o600);
   let complete = false;
   try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await handle.writeFile(value, "utf8");
     await handle.sync();
     complete = true;
   } finally {

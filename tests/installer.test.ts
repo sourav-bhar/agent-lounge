@@ -6,8 +6,8 @@ import {
   detectClients,
   getInstallationHealth,
   getInstallState,
-  installAgentBoard,
-  uninstallAgentBoard
+  installAgentLounge,
+  uninstallAgentLounge
 } from "../src/installer.js";
 import { PACKAGE_NAME } from "../src/constants.js";
 import { VERSION } from "../src/version.js";
@@ -63,7 +63,7 @@ afterEach(async () => {
 describe("agent client installer", () => {
   it("detects supported clients and produces a side-effect-free dry run", async () => {
     expect(detectClients()).toEqual(["codex", "claude"]);
-    const report = await installAgentBoard({
+    const report = await installAgentLounge({
       home: boardHome,
       clients: ["codex", "claude"],
       dryRun: true
@@ -72,7 +72,7 @@ describe("agent client installer", () => {
     expect(report.actions).toHaveLength(4);
     expect(report.actions.every((action) => action.status === "planned")).toBe(true);
     await expect(stat(boardHome)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(stat(join(codexHome, "skills", "agent-board"))).rejects.toMatchObject({
+    await expect(stat(join(codexHome, "skills", "agent-lounge"))).rejects.toMatchObject({
       code: "ENOENT"
     });
     expect(await commandLog()).not.toContainEqual(
@@ -81,7 +81,7 @@ describe("agent client installer", () => {
   });
 
   it("installs and idempotently updates exact user-level MCP commands and skills", async () => {
-    const first = await installAgentBoard({
+    const first = await installAgentLounge({
       home: boardHome,
       clients: ["codex", "claude"]
     });
@@ -99,9 +99,9 @@ describe("agent client installer", () => {
       args: [
         "mcp",
         "add",
-        "agent-board",
+        "agent-lounge",
         "--env",
-        "AGENT_BOARD_CLIENT=codex",
+        "AGENT_LOUNGE_CLIENT=codex",
         "--",
         "npx",
         "-y",
@@ -118,9 +118,9 @@ describe("agent client installer", () => {
         "user",
         "--transport",
         "stdio",
-        "agent-board",
+        "agent-lounge",
         "--env",
-        "AGENT_BOARD_CLIENT=claude-code",
+        "AGENT_LOUNGE_CLIENT=claude-code",
         "--",
         "npx",
         "-y",
@@ -128,12 +128,12 @@ describe("agent client installer", () => {
         "mcp"
       ]
     });
-    expect(await readFile(join(codexHome, "skills", "agent-board", "SKILL.md"), "utf8")).toContain(
-      "managed-by: agent-board"
+    expect(await readFile(join(codexHome, "skills", "agent-lounge", "SKILL.md"), "utf8")).toContain(
+      "managed-by: agent-lounge"
     );
-    expect(await readFile(join(claudeHome, "skills", "agent-board", "SKILL.md"), "utf8")).toContain(
-      "managed-by: agent-board"
-    );
+    expect(
+      await readFile(join(claudeHome, "skills", "agent-lounge", "SKILL.md"), "utf8")
+    ).toContain("managed-by: agent-lounge");
     expect(Object.keys((await getInstallState(boardHome)).clients).sort()).toEqual([
       "claude",
       "codex"
@@ -143,7 +143,7 @@ describe("agent client installer", () => {
       expect.objectContaining({ client: "claude", ok: true })
     ]);
 
-    const second = await installAgentBoard({
+    const second = await installAgentLounge({
       home: boardHome,
       clients: ["codex", "claude"]
     });
@@ -157,14 +157,40 @@ describe("agent client installer", () => {
     ]);
   });
 
+  it("migrates managed Agent Board MCP entries and companion skills in place", async () => {
+    await writeFakeState("codex", "legacy-managed", "agent-board");
+    const legacySkillPath = join(codexHome, "skills", "agent-board");
+    await mkdir(legacySkillPath, { recursive: true });
+    await writeFile(
+      join(legacySkillPath, "SKILL.md"),
+      "---\nname: agent-board\n---\n\n<!-- managed-by: agent-board -->\n",
+      "utf8"
+    );
+
+    const report = await installAgentLounge({ home: boardHome, clients: ["codex"] });
+
+    expect(report.actions.map((action) => action.action)).toEqual([
+      "migrate_mcp",
+      "add_mcp",
+      "install_skill",
+      "remove_legacy_skill"
+    ]);
+    expect(await readFakeState("codex", "agent-board")).toBeNull();
+    expect(await readFakeState("codex", "agent-lounge")).toBe("managed");
+    await expect(stat(legacySkillPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(codexHome, "skills", "agent-lounge", "SKILL.md"), "utf8")).toContain(
+      "managed-by: agent-lounge"
+    );
+  });
+
   it("preserves foreign MCP configurations unless force is explicit", async () => {
     await writeFakeState("codex", "foreign");
-    await expect(installAgentBoard({ home: boardHome, clients: ["codex"] })).rejects.toThrow(
+    await expect(installAgentLounge({ home: boardHome, clients: ["codex"] })).rejects.toThrow(
       /different command/i
     );
     expect(await readFakeState("codex")).toBe("foreign");
 
-    const forced = await installAgentBoard({
+    const forced = await installAgentLounge({
       home: boardHome,
       clients: ["codex"],
       force: true
@@ -178,46 +204,46 @@ describe("agent client installer", () => {
   });
 
   it("backs up an unrecognized companion skill only when force is explicit", async () => {
-    const skillPath = join(codexHome, "skills", "agent-board");
+    const skillPath = join(codexHome, "skills", "agent-lounge");
     await mkdir(skillPath, { recursive: true });
     await writeFile(join(skillPath, "SKILL.md"), "# User-owned skill\n", "utf8");
-    await expect(installAgentBoard({ home: boardHome, clients: ["codex"] })).rejects.toThrow(
-      /unrecognized agent-board skill/i
+    await expect(installAgentLounge({ home: boardHome, clients: ["codex"] })).rejects.toThrow(
+      /unrecognized agent-lounge skill/i
     );
     expect(await readFile(join(skillPath, "SKILL.md"), "utf8")).toContain("User-owned");
 
-    const report = await installAgentBoard({
+    const report = await installAgentLounge({
       home: boardHome,
       clients: ["codex"],
       force: true
     });
     expect(report.warnings.join(" ")).toMatch(/preserved the existing skill/i);
     const siblings = await readdir(join(codexHome, "skills"));
-    const backup = siblings.find((entry) => entry.startsWith("agent-board.backup-"));
+    const backup = siblings.find((entry) => entry.startsWith("agent-lounge.backup-"));
     expect(backup).toBeDefined();
     expect(await readFile(join(codexHome, "skills", backup!, "SKILL.md"), "utf8")).toContain(
       "User-owned"
     );
     expect(await readFile(join(skillPath, "SKILL.md"), "utf8")).toContain(
-      "managed-by: agent-board"
+      "managed-by: agent-lounge"
     );
   });
 
   it("uninstalls managed integration files but preserves board data", async () => {
-    await installAgentBoard({ home: boardHome, clients: ["codex"] });
-    const report = await uninstallAgentBoard({ home: boardHome, clients: ["codex"] });
+    await installAgentLounge({ home: boardHome, clients: ["codex"] });
+    const report = await uninstallAgentLounge({ home: boardHome, clients: ["codex"] });
     expect(report.ok).toBe(true);
     expect(report.actions.map((action) => action.action)).toEqual(["remove_mcp", "remove_skill"]);
     expect(await readFakeState("codex")).toBeNull();
-    await expect(stat(join(codexHome, "skills", "agent-board"))).rejects.toMatchObject({
+    await expect(stat(join(codexHome, "skills", "agent-lounge"))).rejects.toMatchObject({
       code: "ENOENT"
     });
-    expect(await stat(join(boardHome, ".agent-board-store"))).toBeTruthy();
+    expect(await stat(join(boardHome, ".agent-lounge-store"))).toBeTruthy();
     expect((await getInstallState(boardHome)).clients.codex).toBeUndefined();
   });
 
   it("does not remove a user-modified command without an explicit force", async () => {
-    await installAgentBoard({ home: boardHome, clients: ["codex"] });
+    await installAgentLounge({ home: boardHome, clients: ["codex"] });
     await writeFakeState("codex", "foreign");
     expect(await getInstallationHealth(boardHome)).toEqual([
       expect.objectContaining({
@@ -227,13 +253,13 @@ describe("agent client installer", () => {
         command_matches: false
       })
     ]);
-    const preserved = await uninstallAgentBoard({ home: boardHome, clients: ["codex"] });
+    const preserved = await uninstallAgentLounge({ home: boardHome, clients: ["codex"] });
     expect(preserved.ok).toBe(false);
     expect(preserved.warnings.join(" ")).toMatch(/preserved/i);
     expect(await readFakeState("codex")).toBe("foreign");
     expect((await getInstallState(boardHome)).clients.codex).toBeDefined();
 
-    const forced = await uninstallAgentBoard({
+    const forced = await uninstallAgentLounge({
       home: boardHome,
       clients: ["codex"],
       force: true
@@ -260,45 +286,68 @@ import { join } from "node:path";
 
 const client = process.argv[2];
 const args = process.argv.slice(3);
-const statePath = join(process.env.FAKE_MCP_STATE_DIR, client + ".txt");
 appendFileSync(process.env.FAKE_MCP_LOG, JSON.stringify({ client, args }) + "\\n");
 if (args[0] === "--version") process.exit(0);
 if (args[0] !== "mcp") process.exit(2);
 if (args[1] === "get") {
+  const configName = args[2];
+  const statePath = join(process.env.FAKE_MCP_STATE_DIR, client + "-" + configName + ".txt");
   if (!existsSync(statePath)) process.exit(1);
   const mode = readFileSync(statePath, "utf8").trim();
   const version = process.env.FAKE_PACKAGE_VERSION;
   if (client === "codex") {
     const managed = mode === "managed";
+    const legacy = mode === "legacy-managed";
     process.stdout.write(JSON.stringify({
       transport: {
         type: "stdio",
-        command: managed ? "npx" : "different-command",
-        args: managed ? ["-y", "@souravbhar/agent-board@" + version, "mcp"] : ["--other"],
-        env: { AGENT_BOARD_CLIENT: managed ? "codex" : "other" }
+        command: managed || legacy ? "npx" : "different-command",
+        args: managed
+          ? ["-y", "agent-lounge@" + version, "mcp"]
+          : legacy
+            ? ["-y", "@souravbhar/agent-board@0.1.0", "mcp"]
+            : ["--other"],
+        env: managed
+          ? { AGENT_LOUNGE_CLIENT: "codex" }
+          : legacy
+            ? { AGENT_BOARD_CLIENT: "codex" }
+            : { AGENT_LOUNGE_CLIENT: "other" }
       }
     }));
   } else {
     const managed = mode === "managed";
+    const legacy = mode === "legacy-managed";
     process.stdout.write([
-      "agent-board:",
+      configName + ":",
       "  Scope: User config (available in all your projects)",
-      "  Status: " + (managed ? "Connected" : "Failed"),
+      "  Status: " + (managed || legacy ? "Connected" : "Failed"),
       "  Type: stdio",
-      "  Command: " + (managed ? "npx" : "different-command"),
+      "  Command: " + (managed || legacy ? "npx" : "different-command"),
       "  Args: " +
-        (managed ? "-y @souravbhar/agent-board@" + version + " mcp" : "--other"),
+        (managed
+          ? "-y agent-lounge@" + version + " mcp"
+          : legacy
+            ? "-y @souravbhar/agent-board@0.1.0 mcp"
+            : "--other"),
       "  Environment:",
-      "    AGENT_BOARD_CLIENT=" + (managed ? "claude-code" : "other")
+      managed
+        ? "    AGENT_LOUNGE_CLIENT=claude-code"
+        : legacy
+          ? "    AGENT_BOARD_CLIENT=claude-code"
+          : "    AGENT_LOUNGE_CLIENT=other"
     ].join("\\n"));
   }
   process.exit(0);
 }
 if (args[1] === "add") {
+  const configName = args.includes("agent-lounge") ? "agent-lounge" : "agent-board";
+  const statePath = join(process.env.FAKE_MCP_STATE_DIR, client + "-" + configName + ".txt");
   writeFileSync(statePath, "managed\\n");
   process.exit(0);
 }
 if (args[1] === "remove") {
+  const configName = args[2];
+  const statePath = join(process.env.FAKE_MCP_STATE_DIR, client + "-" + configName + ".txt");
   if (existsSync(statePath)) unlinkSync(statePath);
   process.exit(0);
 }
@@ -339,13 +388,20 @@ async function commandLog(): Promise<Array<{ client: string; args: string[] }>> 
   }
 }
 
-async function writeFakeState(client: "codex" | "claude", value: "managed" | "foreign") {
-  await writeFile(join(stateDirectory, `${client}.txt`), `${value}\n`, "utf8");
+async function writeFakeState(
+  client: "codex" | "claude",
+  value: "managed" | "legacy-managed" | "foreign",
+  configName = "agent-lounge"
+) {
+  await writeFile(join(stateDirectory, `${client}-${configName}.txt`), `${value}\n`, "utf8");
 }
 
-async function readFakeState(client: "codex" | "claude"): Promise<string | null> {
+async function readFakeState(
+  client: "codex" | "claude",
+  configName = "agent-lounge"
+): Promise<string | null> {
   try {
-    return (await readFile(join(stateDirectory, `${client}.txt`), "utf8")).trim();
+    return (await readFile(join(stateDirectory, `${client}-${configName}.txt`), "utf8")).trim();
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
     throw error;

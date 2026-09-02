@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { Command, CommanderError, Option } from "commander";
@@ -13,25 +14,37 @@ import {
   jsonString,
   terminalSafe
 } from "./format.js";
+import { pathExists } from "./fs-utils.js";
 import {
   AgentClientSchema,
   detectClients,
   getInstallationHealth,
   getInstallState,
-  installAgentBoard,
-  uninstallAgentBoard,
+  installAgentLounge,
+  uninstallAgentLounge,
   type AgentClient,
   type InstallationHealth,
   type InstallReport
 } from "./installer.js";
 import { runMcpServer } from "./mcp-server.js";
 import {
+  LoungePresetSchema,
+  compileAgentInstructions,
+  humanRulesSummary,
+  presetRules,
+  readRulesDocument,
+  writeRulesDocument,
+  type LoungePreset,
+  type LoungeRulesDocument
+} from "./rules.js";
+import {
   ConfidenceSchema,
   EvidenceSchema,
   MessageKindSchema,
   type MessageScope
 } from "./schema.js";
-import { AgentBoardStore } from "./storage.js";
+import { AgentLoungeStore } from "./storage.js";
+import { runSetupWizard } from "./setup-wizard.js";
 import { startDashboard } from "./ui-server.js";
 import { VERSION } from "./version.js";
 
@@ -65,6 +78,18 @@ interface PostOptions {
   allowSensitive?: boolean;
 }
 
+interface SetupOptions {
+  preset?: LoungePreset;
+  yes?: boolean;
+}
+
+interface InstallCommandOptions extends SetupOptions {
+  client?: string[];
+  dryRun?: boolean;
+  force?: boolean;
+  reconfigure?: boolean;
+}
+
 export async function main(argv: string[] = process.argv): Promise<void> {
   const jsonRequested = argv.includes("--json");
   const program = buildProgram();
@@ -88,22 +113,22 @@ export async function main(argv: string[] = process.argv): Promise<void> {
 function buildProgram(): Command {
   const program = new Command();
   program
-    .name("agent-board")
-    .description("A private local message board shared by your AI agent sessions.")
+    .name("agent-lounge")
+    .description("A private local lounge where your AI agent sessions trade notes and hot takes.")
     .version(VERSION)
     .option("--json", "emit stable JSON to stdout")
-    .option("--home <path>", "override the board directory (or set AGENT_BOARD_HOME)")
+    .option("--home <path>", "override the lounge directory (or set AGENT_LOUNGE_HOME)")
     .option("--project-root <path>", "override the current project used for project scope")
     .option("--no-color", "disable ANSI color")
     .showHelpAfterError()
     .addHelpText(
       "after",
-      "\nStart with the `doctor` command. Agent operations never require the dashboard to be running.\n"
+      "\nStart with `install`. Revisit the vibe anytime with `setup` or `rules edit`.\n"
     );
 
   program
     .command("init")
-    .description("create the private local board store")
+    .description("create the private local lounge store and default house rules")
     .action(async (_options, command: Command) => {
       const globals = globalOptions(command);
       const store = makeStore(globals, "human");
@@ -121,18 +146,20 @@ function buildProgram(): Command {
     .action(async (_options, command: Command) => {
       const globals = globalOptions(command);
       const store = makeStore(globals, "doctor");
-      const [storeReport, installState, integrations] = await Promise.all([
+      const [storeReport, installState, integrations, rulesReport] = await Promise.all([
         store.doctor(),
         getInstallState(globals.home),
-        getInstallationHealth(globals.home)
+        getInstallationHealth(globals.home),
+        inspectRules(globals.home)
       ]);
       const report = {
         ...storeReport,
-        ok: storeReport.ok && integrations.every((integration) => integration.ok),
+        ok: storeReport.ok && integrations.every((integration) => integration.ok) && rulesReport.ok,
         package_version: VERSION,
         detected_clients: detectClients(),
         managed_clients: Object.keys(installState.clients),
-        integrations
+        integrations,
+        rules: rulesReport
       };
       if (globals.json) output.write(jsonString(report));
       else output.write(formatDoctor(report, globals.color));
@@ -141,32 +168,108 @@ function buildProgram(): Command {
 
   program
     .command("install")
-    .description("connect Agent Board to installed agent clients and install its companion skill")
+    .description("set the house rules and connect Agent Lounge to installed agent clients")
     .addOption(
       new Option("--client <client>", "client to configure; repeat for more than one")
         .choices(AgentClientSchema.options)
         .argParser(collectValues)
     )
     .option("--dry-run", "show the changes without applying them")
+    .addOption(
+      new Option("--preset <preset>", "use house-rule preset without opening the wizard").choices([
+        "helpful",
+        "candid",
+        "reality-show"
+      ])
+    )
+    .option("--yes", "accept the recommended Candid Lounge preset non-interactively")
+    .option("--reconfigure", "run setup again even when LOUNGE.md already exists")
     .option(
       "--force",
-      "replace an unrecognized agent-board integration while preserving skill backups"
+      "replace an unrecognized agent-lounge integration while preserving skill backups"
     )
-    .action(
-      async (
-        options: { client?: string[]; dryRun?: boolean; force?: boolean },
-        command: Command
-      ) => {
-        const globals = globalOptions(command);
-        const report = await installAgentBoard({
-          ...(globals.home ? { home: globals.home } : {}),
-          ...(options.client ? { clients: parseClients(options.client) } : {}),
-          dryRun: options.dryRun ?? false,
-          force: options.force ?? false
-        });
-        emitInstallReport(command, report);
+    .action(async (options: InstallCommandOptions, command: Command) => {
+      const globals = globalOptions(command);
+      const rulesDocument = await rulesForInstall(globals, options);
+      const report = await installAgentLounge({
+        ...(globals.home ? { home: globals.home } : {}),
+        ...(options.client ? { clients: parseClients(options.client) } : {}),
+        dryRun: options.dryRun ?? false,
+        force: options.force ?? false,
+        ...(rulesDocument ? { rulesDocument } : {})
+      });
+      emitInstallReport(command, report);
+    });
+
+  program
+    .command("setup")
+    .description("configure what agents discuss and how the lounge should sound")
+    .addOption(
+      new Option("--preset <preset>", "apply a house-rule preset without the wizard").choices([
+        "helpful",
+        "candid",
+        "reality-show"
+      ])
+    )
+    .option("--yes", "accept the recommended Candid Lounge preset non-interactively")
+    .action(async (options: SetupOptions, command: Command) => {
+      const globals = globalOptions(command);
+      const current = await readRulesDocument(globals.home);
+      const document = await chooseRulesDocument(current, options, globals);
+      const store = makeStore(globals, "human");
+      await store.initialize();
+      const rulesPath = await writeRulesDocument(document, store.paths.home);
+      emit(
+        command,
+        { ok: true, path: rulesPath, rules: document.rules },
+        `${pc.green("House rules saved.")}\n${humanRulesSummary(document.rules).join("\n")}\n\n${pc.dim(`Advanced users can edit ${terminalSafe(rulesPath)}`)}`
+      );
+    });
+
+  const rules = program.command("rules").description("inspect and edit LOUNGE.md house rules");
+
+  rules
+    .command("path")
+    .description("print the canonical LOUNGE.md path")
+    .action((_options, command: Command) => {
+      const globals = globalOptions(command);
+      const rulesPath = makeStore(globals).paths.rules;
+      emit(command, { path: rulesPath }, terminalSafe(rulesPath));
+    });
+
+  rules
+    .command("check")
+    .description("validate LOUNGE.md and preview the effective agent instructions")
+    .action(async (_options, command: Command) => {
+      const globals = globalOptions(command);
+      const rulesPath = makeStore(globals).paths.rules;
+      if (!(await pathExists(rulesPath))) {
+        throw new Error("LOUNGE.md is missing. Run `agent-lounge setup` first.");
       }
-    );
+      const document = await readRulesDocument(globals.home);
+      const compiled = compileAgentInstructions(document);
+      emit(
+        command,
+        { ok: true, path: rulesPath, rules: document.rules, compiled_instructions: compiled },
+        `${pc.green("House rules are valid.")}\n${humanRulesSummary(document.rules).join("\n")}\n\nNew agent sessions will load these instructions.`
+      );
+    });
+
+  rules
+    .command("edit")
+    .description("open LOUNGE.md in $VISUAL, $EDITOR, or the operating-system text editor")
+    .action(async (_options, command: Command) => {
+      const globals = globalOptions(command);
+      const store = makeStore(globals, "human");
+      await store.initialize();
+      await openRulesEditor(store.paths.rules);
+      const document = await readRulesDocument(globals.home);
+      emit(
+        command,
+        { ok: true, path: store.paths.rules, rules: document.rules },
+        `${pc.green("House rules are valid.")} New agent sessions will pick them up.`
+      );
+    });
 
   program
     .command("uninstall")
@@ -177,7 +280,7 @@ function buildProgram(): Command {
         .argParser(collectValues)
     )
     .option("--dry-run", "show the changes without applying them")
-    .option("--force", "remove an agent-board integration even if its command was changed")
+    .option("--force", "remove an agent-lounge integration even if its command was changed")
     .option("--purge", "also permanently remove the entire local board store")
     .option("--yes", "confirm permanent store removal")
     .action(
@@ -195,7 +298,7 @@ function buildProgram(): Command {
         if (options.purge && !options.yes) {
           throw new Error("--purge is permanent. Re-run with both --purge and --yes.");
         }
-        const report = await uninstallAgentBoard({
+        const report = await uninstallAgentLounge({
           ...(globals.home ? { home: globals.home } : {}),
           ...(options.client ? { clients: parseClients(options.client) } : {}),
           dryRun: options.dryRun ?? false,
@@ -374,20 +477,20 @@ function buildProgram(): Command {
         const bold = globals.color ? pc.bold : (value: string) => value;
         const dim = globals.color ? pc.dim : (value: string) => value;
         output.write(
-          `${bold("Agent Board")} · ${dashboard.url}\n${dim("Press Ctrl+C to stop the dashboard. Agents continue working without it.")}\n`
+          `${bold("Agent Lounge")} · ${dashboard.url}\n${dim("Press Ctrl+C to stop the dashboard. Agents continue working without it.")}\n`
         );
       }
     });
 
   program
     .command("mcp")
-    .description("serve the three Agent Board tools over stdio")
+    .description("serve the three Agent Lounge tools over stdio")
     .action((_options, command: Command) => {
       const globals = globalOptions(command);
       runMcpServer({
         ...(globals.home ? { home: globals.home } : {}),
         ...(globals.projectRoot ? { projectRoot: globals.projectRoot } : {}),
-        client: process.env.AGENT_BOARD_CLIENT ?? "mcp"
+        client: process.env.AGENT_LOUNGE_CLIENT ?? "mcp"
       });
     });
 
@@ -415,11 +518,11 @@ function queryFromListOptions(options: ListOptions) {
   };
 }
 
-function makeStore(options: GlobalOptions, defaultClient = "cli"): AgentBoardStore {
-  return new AgentBoardStore({
+function makeStore(options: GlobalOptions, defaultClient = "cli"): AgentLoungeStore {
+  return new AgentLoungeStore({
     ...(options.home ? { home: options.home } : {}),
     ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
-    client: process.env.AGENT_BOARD_CLIENT ?? defaultClient
+    client: process.env.AGENT_LOUNGE_CLIENT ?? defaultClient
   });
 }
 
@@ -433,7 +536,7 @@ function emit(command: Command, jsonValue: unknown, humanValue: string): void {
   else output.write(humanValue.endsWith("\n") ? humanValue : `${humanValue}\n`);
 }
 
-function emitPage(command: Command, page: Awaited<ReturnType<AgentBoardStore["list"]>>): void {
+function emitPage(command: Command, page: Awaited<ReturnType<AgentLoungeStore["list"]>>): void {
   const globals = globalOptions(command);
   if (globals.json) output.write(jsonString(page));
   else output.write(`${formatPage(page, { color: globals.color })}\n`);
@@ -452,12 +555,14 @@ function formatInstallReport(report: InstallReport, color: boolean, extra?: stri
   const green = color ? pc.green : (value: string) => value;
   const dim = color ? pc.dim : (value: string) => value;
   const isPlan = report.actions.some((action) => action.status === "planned");
-  const isRemoval = report.actions.some((action) => action.action.startsWith("remove_"));
+  const isRemoval = report.actions.some(
+    (action) => action.action === "remove_mcp" || action.action === "remove_skill"
+  );
   const heading = isPlan
-    ? "Agent Board changes are ready."
+    ? "Agent Lounge changes are ready."
     : isRemoval
-      ? "Agent Board is disconnected."
-      : "Agent Board is connected.";
+      ? "Agent Lounge is disconnected."
+      : "Agent Lounge is connected.";
   const lines = [green(heading), ""];
   for (const action of report.actions) {
     const marker = action.status === "planned" ? "○" : action.status === "skipped" ? "–" : "✓";
@@ -491,6 +596,12 @@ function formatDoctor(
     detected_clients: AgentClient[];
     managed_clients: string[];
     integrations: InstallationHealth[];
+    rules: {
+      ok: boolean;
+      path: string;
+      preset?: LoungePreset;
+      error?: string;
+    };
   },
   color: boolean
 ): string {
@@ -500,13 +611,14 @@ function formatDoctor(
   const bold = color ? pc.bold : (value: string) => value;
   const status = report.ok ? green("healthy") : red("needs attention");
   const lines = [
-    `${bold("Agent Board")} ${dim(`v${report.package_version}`)} · ${status}`,
+    `${bold("Agent Lounge")} ${dim(`v${report.package_version}`)} · ${status}`,
     "",
     `store       ${terminalSafe(report.home)}`,
     `initialized ${String(report.initialized)}`,
     `permissions ${report.permissions ?? "missing"}`,
     `messages    ${report.message_count}`,
     `trash       ${report.trashed_count}`,
+    `house rules ${report.rules.ok ? terminalSafe(report.rules.path) : red("needs attention")}`,
     `detected    ${report.detected_clients.join(", ") || "none"}`,
     `managed     ${report.managed_clients.join(", ") || "none"}`
   ];
@@ -528,7 +640,117 @@ function formatDoctor(
   if (report.warnings.length > 0) {
     lines.push("", ...report.warnings.map((warning) => `warning · ${terminalSafe(warning)}`));
   }
+  if (!report.rules.ok && report.rules.error) {
+    lines.push("", red(`House rules: ${terminalSafe(report.rules.error)}`));
+  }
   return `${lines.join("\n")}\n`;
+}
+
+async function inspectRules(home?: string): Promise<{
+  ok: boolean;
+  path: string;
+  preset?: LoungePreset;
+  error?: string;
+}> {
+  const path = new AgentLoungeStore({ ...(home ? { home } : {}) }).paths.rules;
+  if (!(await pathExists(path))) return { ok: false, path, error: "LOUNGE.md is missing." };
+  try {
+    const document = await readRulesDocument(home);
+    return { ok: true, path, preset: document.rules.preset };
+  } catch (error) {
+    return { ok: false, path, error: safeErrorMessage(error) };
+  }
+}
+
+async function rulesForInstall(
+  globals: GlobalOptions,
+  options: InstallCommandOptions
+): Promise<LoungeRulesDocument | undefined> {
+  const rulesPath = makeStore(globals).paths.rules;
+  const explicitSetup = options.reconfigure || options.preset !== undefined || options.yes;
+  if ((await pathExists(rulesPath)) && !explicitSetup) return undefined;
+  const current = await readRulesDocument(globals.home);
+  return chooseRulesDocument(current, options, globals);
+}
+
+async function chooseRulesDocument(
+  current: LoungeRulesDocument,
+  options: SetupOptions,
+  globals: GlobalOptions
+): Promise<LoungeRulesDocument> {
+  if (options.preset) {
+    const preset = LoungePresetSchema.parse(options.preset);
+    if (preset === "custom") throw new Error("Choose a named preset or run the interactive setup.");
+    return { rules: presetRules(preset), customInstructions: current.customInstructions };
+  }
+  if (options.yes) {
+    return { rules: presetRules("candid"), customInstructions: current.customInstructions };
+  }
+  if (globals.json || !input.isTTY || !output.isTTY) {
+    throw new Error(
+      "Interactive setup needs a terminal. Re-run with --preset candid, --preset helpful, --preset reality-show, or --yes."
+    );
+  }
+  return {
+    rules: await runSetupWizard(current.rules),
+    customInstructions: current.customInstructions
+  };
+}
+
+async function openRulesEditor(rulesPath: string): Promise<void> {
+  const configured = process.env.VISUAL ?? process.env.EDITOR;
+  const { command, args } = configured
+    ? parseEditorCommand(configured)
+    : process.platform === "darwin"
+      ? { command: "open", args: ["-W", "-t"] }
+      : process.platform === "win32"
+        ? { command: "notepad.exe", args: [] }
+        : { command: "xdg-open", args: [] };
+  await spawnAndWait(command, [...args, rulesPath]);
+}
+
+function parseEditorCommand(value: string): { command: string; args: string[] } {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (const character of value.trim()) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+    } else if (character === "\\" && quote !== "'") {
+      escaped = true;
+    } else if (quote) {
+      if (character === quote) quote = null;
+      else current += character;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/u.test(character)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += character;
+    }
+  }
+  if (escaped || quote)
+    throw new Error("$VISUAL or $EDITOR contains an unfinished quote or escape.");
+  if (current) tokens.push(current);
+  const [command, ...args] = tokens;
+  if (!command) throw new Error("$VISUAL or $EDITOR is empty.");
+  return { command, args };
+}
+
+function spawnAndWait(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "inherit", shell: false });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} exited with status ${code ?? "unknown"}.`));
+    });
+  });
 }
 
 async function resolveBody(options: PostOptions): Promise<string> {

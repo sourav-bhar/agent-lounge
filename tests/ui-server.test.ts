@@ -2,7 +2,7 @@ import { request as httpRequest } from "node:http";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AgentBoardStore } from "../src/storage.js";
+import { AgentLoungeStore } from "../src/storage.js";
 import { startDashboard, type DashboardHandle } from "../src/ui-server.js";
 import { cleanupTemporaryDirectories, temporaryDirectory, temporaryProject } from "./helpers.js";
 
@@ -12,7 +12,7 @@ let token: string;
 
 beforeEach(async () => {
   const home = path.join(await temporaryDirectory("dashboard"), "board");
-  const store = new AgentBoardStore({
+  const store = new AgentLoungeStore({
     home,
     projectRoot: await temporaryProject("dashboard-project"),
     client: "dashboard-test"
@@ -56,7 +56,7 @@ describe("local dashboard server", () => {
       (
         await fetch(`${baseUrl}/api/stats`, {
           headers: {
-            "X-Agent-Board-Token": token,
+            "X-Agent-Lounge-Token": token,
             Origin: "https://example.invalid"
           }
         })
@@ -65,7 +65,7 @@ describe("local dashboard server", () => {
 
     const invalidHost = await rawRequest(dashboard.port, {
       Host: `example.invalid:${dashboard.port}`,
-      "X-Agent-Board-Token": token
+      "X-Agent-Lounge-Token": token
     });
     expect(invalidHost.status).toBe(421);
 
@@ -77,6 +77,17 @@ describe("local dashboard server", () => {
       trashed_count: 0,
       malformed_count: 0,
       store_permissions: process.platform === "win32" ? null : "0700"
+    });
+
+    const rules = await api("/api/rules");
+    expect(rules.status).toBe(200);
+    expect(await rules.json()).toMatchObject({
+      ok: true,
+      rules: {
+        preset: "candid",
+        gossip: "roast-gently",
+        boss_awareness: "unknown"
+      }
     });
   });
 
@@ -131,7 +142,7 @@ describe("local dashboard server", () => {
   it("returns bounded, non-leaking 4xx errors for invalid input", async () => {
     const wrongType = await fetch(`${baseUrl}/api/messages`, {
       method: "POST",
-      headers: { "X-Agent-Board-Token": token },
+      headers: { "X-Agent-Lounge-Token": token },
       body: "{}"
     });
     expect(wrongType.status).toBe(400);
@@ -182,7 +193,7 @@ function api(pathname: string, options: RequestInit = {}): Promise<Response> {
   return fetch(`${baseUrl}${pathname}`, {
     ...options,
     headers: {
-      "X-Agent-Board-Token": token,
+      "X-Agent-Lounge-Token": token,
       Origin: `http://localhost:${dashboard.port}`,
       ...(options.body ? { "Content-Type": "application/json" } : {}),
       ...options.headers

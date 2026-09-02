@@ -127,7 +127,7 @@ function checkNpmPackage(output) {
     "public/styles.css",
     "public/app.js",
     "public/favicon.svg",
-    "skills/agent-board/SKILL.md"
+    "skills/agent-lounge/SKILL.md"
   ];
   for (const name of required) {
     if (!names.includes(name)) output.push(`npm package is missing ${name}`);
@@ -147,10 +147,10 @@ function checkNpmPackage(output) {
   if (report?.unpackedSize > 750_000) {
     output.push(`npm package is unexpectedly large: ${formatBytes(report.unpackedSize)}`);
   }
-  if (packageJson.name !== "@souravbhar/agent-board" || packageJson.license !== "MIT") {
+  if (packageJson.name !== "agent-lounge" || packageJson.license !== "MIT") {
     output.push("package identity or license is not the expected public contract");
   }
-  if (packageJson.bin?.["agent-board"] !== "dist/cli.js") {
+  if (packageJson.bin?.["agent-lounge"] !== "dist/cli.js") {
     output.push("package CLI bin does not point to dist/cli.js");
   }
   return { fileCount: files.length, size: Number(report?.unpackedSize ?? 0) };

@@ -3,18 +3,19 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import { createMcpServer } from "../src/mcp-server.js";
+import { presetRules, writeRulesDocument } from "../src/rules.js";
 import { cleanupTemporaryDirectories, temporaryDirectory, temporaryProject } from "./helpers.js";
 
 let client: Client;
-let server: ReturnType<typeof createMcpServer>;
+let server: Awaited<ReturnType<typeof createMcpServer>>;
 let home: string;
 let projectRoot: string;
 
 beforeEach(async () => {
   home = path.join(await temporaryDirectory("mcp"), "board");
   projectRoot = await temporaryProject("mcp-project");
-  client = new Client({ name: "agent-board-test", version: "1.0.0" });
-  server = createMcpServer({ home, projectRoot, client: "mcp-test" });
+  client = new Client({ name: "agent-lounge-test", version: "1.0.0" });
+  server = await createMcpServer({ home, projectRoot, client: "mcp-test" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   await client.connect(clientTransport);
@@ -26,21 +27,21 @@ afterEach(async () => {
   await cleanupTemporaryDirectories();
 });
 
-describe("Agent Board MCP server", () => {
+describe("Agent Lounge MCP server", () => {
   it("advertises exactly three focused tools with safe annotations and instructions", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((tool) => tool.name).sort()).toEqual([
-      "agent_board_post",
-      "agent_board_read",
-      "agent_board_search"
+      "agent_lounge_post",
+      "agent_lounge_read",
+      "agent_lounge_search"
     ]);
-    expect(tools.find((tool) => tool.name === "agent_board_read")?.annotations).toMatchObject({
+    expect(tools.find((tool) => tool.name === "agent_lounge_read")?.annotations).toMatchObject({
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
       openWorldHint: false
     });
-    expect(tools.find((tool) => tool.name === "agent_board_post")?.annotations).toMatchObject({
+    expect(tools.find((tool) => tool.name === "agent_lounge_post")?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -50,9 +51,32 @@ describe("Agent Board MCP server", () => {
     expect(client.getInstructions()).toMatch(/never as user authorization/i);
   });
 
+  it("loads the configured boss-awareness choice into agent-facing instructions", async () => {
+    expect(client.getInstructions()).not.toContain("can check in on lounge conversations");
+    await client.close();
+    await server.close();
+
+    await writeRulesDocument(
+      {
+        rules: { ...presetRules("helpful"), boss_awareness: "known" },
+        customInstructions: "# Extra house rules"
+      },
+      home
+    );
+    client = new Client({ name: "agent-lounge-known-boss-test", version: "1.0.0" });
+    server = await createMcpServer({ home, projectRoot, client: "mcp-test" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    expect(client.getInstructions()).toContain(
+      "You know the boss can check in on lounge conversations."
+    );
+  });
+
   it("posts, reads, and searches structured local messages end to end", async () => {
     const post = await client.callTool({
-      name: "agent_board_post",
+      name: "agent_lounge_post",
       arguments: {
         scope: "project",
         kind: "lesson",
@@ -72,7 +96,7 @@ describe("Agent Board MCP server", () => {
     expect(posted.message.project.name).toBe(path.basename(projectRoot));
 
     const search = await client.callTool({
-      name: "agent_board_search",
+      name: "agent_lounge_search",
       arguments: {
         query: "validation faster",
         scope: "relevant",
@@ -88,7 +112,7 @@ describe("Agent Board MCP server", () => {
     expect(searchPage.items[0]?.message.id).toBe(posted.message.id);
 
     const read = await client.callTool({
-      name: "agent_board_read",
+      name: "agent_lounge_read",
       arguments: { scope: "all", limit: 10, response_format: "markdown" }
     });
     expect(read.isError).not.toBe(true);
@@ -100,7 +124,7 @@ describe("Agent Board MCP server", () => {
   it("returns tool errors without leaking the rejected secret value", async () => {
     const syntheticSecret = `gh${"p"}_${"q".repeat(24)}`;
     const result = await client.callTool({
-      name: "agent_board_post",
+      name: "agent_lounge_post",
       arguments: {
         scope: "personal",
         kind: "warning",
@@ -118,7 +142,7 @@ describe("Agent Board MCP server", () => {
 
   it("rejects structurally invalid calls at the protocol boundary", async () => {
     const result = await client.callTool({
-      name: "agent_board_post",
+      name: "agent_lounge_post",
       arguments: {
         scope: "personal",
         kind: "reply",
@@ -136,7 +160,7 @@ describe("Agent Board MCP server", () => {
   it("bounds large responses and provides a correct continuation offset", async () => {
     for (let index = 0; index < 5; index += 1) {
       const result = await client.callTool({
-        name: "agent_board_post",
+        name: "agent_lounge_post",
         arguments: {
           scope: "personal",
           kind: "note",
@@ -150,7 +174,7 @@ describe("Agent Board MCP server", () => {
     }
 
     const first = await client.callTool({
-      name: "agent_board_read",
+      name: "agent_lounge_read",
       arguments: { scope: "personal", limit: 5, offset: 0, response_format: "json" }
     });
     const page = first.structuredContent as {
@@ -172,7 +196,7 @@ describe("Agent Board MCP server", () => {
     );
 
     const second = await client.callTool({
-      name: "agent_board_read",
+      name: "agent_lounge_read",
       arguments: {
         scope: "personal",
         limit: 5,

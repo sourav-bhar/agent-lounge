@@ -6,6 +6,7 @@ import { STORE_SCHEMA_VERSION } from "./constants.js";
 import {
   atomicWriteJson,
   atomicWriteJsonIfAbsent,
+  atomicWriteTextIfAbsent,
   chmodPrivateDirectory,
   isNodeError,
   pathExists,
@@ -17,7 +18,9 @@ import {
   boardRootFor,
   compactTimestamp,
   curationPath,
+  defaultStoreHome,
   getStorePaths,
+  legacyStoreHome,
   messageDirectoryForDate,
   projectRootFromEnvironment,
   resolveProjectRef,
@@ -42,6 +45,7 @@ import {
   type StoredMessage
 } from "./schema.js";
 import { assertNoSensitivePatterns } from "./sensitive.js";
+import { defaultRulesDocument, serializeRulesDocument } from "./rules.js";
 
 interface StoredRecord {
   message: StoredMessage;
@@ -58,7 +62,7 @@ interface TrashManifest {
   curation_path?: string;
 }
 
-export interface AgentBoardStoreOptions {
+export interface AgentLoungeStoreOptions {
   home?: string;
   projectRoot?: string;
   client?: string;
@@ -69,21 +73,51 @@ export interface PostMessageOptions {
   allowSensitive?: boolean;
 }
 
-export class AgentBoardStore {
+export async function migrateLegacyStoreDirectory(
+  legacyHome: string,
+  loungeHome: string
+): Promise<boolean> {
+  const source = path.resolve(legacyHome);
+  const target = path.resolve(loungeHome);
+  if (source === target || (await pathExists(target)) || !(await pathExists(source))) return false;
+  try {
+    await rename(source, target);
+    return true;
+  } catch (error) {
+    if (
+      (isNodeError(error, "ENOENT") || isNodeError(error, "EEXIST")) &&
+      (await pathExists(target))
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export class AgentLoungeStore {
   readonly paths: StorePaths;
   readonly projectRoot: string;
   readonly author: Author;
+  private readonly migrateLegacyDefault: boolean;
 
-  constructor(options: AgentBoardStoreOptions = {}) {
+  constructor(options: AgentLoungeStoreOptions = {}) {
     this.paths = getStorePaths(resolveStoreHome(options.home));
     this.projectRoot = path.resolve(options.projectRoot ?? projectRootFromEnvironment());
     this.author = {
-      client: sanitizeClientName(options.client ?? process.env.AGENT_BOARD_CLIENT ?? "cli"),
+      client: sanitizeClientName(
+        options.client ?? process.env.AGENT_LOUNGE_CLIENT ?? process.env.AGENT_BOARD_CLIENT ?? "cli"
+      ),
       run_id: options.runId ?? randomUUID()
     };
+    this.migrateLegacyDefault =
+      options.home === undefined &&
+      process.env.AGENT_LOUNGE_HOME === undefined &&
+      process.env.AGENT_BOARD_HOME === undefined &&
+      this.paths.home === defaultStoreHome();
   }
 
   async initialize(): Promise<void> {
+    await this.migrateLegacyStore();
     await mkdir(this.paths.home, { recursive: true, mode: 0o700 });
     await chmodPrivateDirectory(this.paths.home);
     await Promise.all([
@@ -95,8 +129,14 @@ export class AgentBoardStore {
     await atomicWriteJsonIfAbsent(this.paths.sentinel, {
       schema_version: STORE_SCHEMA_VERSION,
       created_at: new Date().toISOString(),
-      product: "agent-board"
+      product: "agent-lounge"
     });
+    await atomicWriteTextIfAbsent(this.paths.rules, serializeRulesDocument(defaultRulesDocument()));
+  }
+
+  private async migrateLegacyStore(): Promise<void> {
+    if (!this.migrateLegacyDefault) return;
+    await migrateLegacyStoreDirectory(legacyStoreHome(), this.paths.home);
   }
 
   async post(
@@ -322,7 +362,7 @@ export class AgentBoardStore {
   async purgeStore(): Promise<void> {
     assertSafePurgeTarget(this.paths.home);
     if (!(await pathExists(this.paths.sentinel))) {
-      throw new Error(`Refusing to purge ${this.paths.home}: Agent Board sentinel is missing.`);
+      throw new Error(`Refusing to purge ${this.paths.home}: Agent Lounge sentinel is missing.`);
     }
     await rm(this.paths.home, { recursive: true, force: false });
   }
@@ -507,7 +547,7 @@ function safePathInside(root: string, relativePath: string): string {
   const target = path.resolve(root, relativePath);
   const relation = path.relative(root, target);
   if (relation.startsWith("..") || path.isAbsolute(relation)) {
-    throw new Error("Trash manifest points outside the Agent Board store.");
+    throw new Error("Trash manifest points outside the Agent Lounge store.");
   }
   return target;
 }

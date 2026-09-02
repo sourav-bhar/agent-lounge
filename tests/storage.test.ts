@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promise
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { AgentBoardStore } from "../src/storage.js";
+import { AgentLoungeStore, migrateLegacyStoreDirectory } from "../src/storage.js";
 import {
   cleanupTemporaryDirectories,
   messageInput,
@@ -12,11 +12,39 @@ import {
 
 afterEach(cleanupTemporaryDirectories);
 
-describe("AgentBoardStore", () => {
+describe("AgentLoungeStore", () => {
+  it("moves a legacy Agent Board store intact and adds current Lounge files", async () => {
+    const parent = await temporaryDirectory("legacy-store");
+    const legacyHome = path.join(parent, ".agent-board");
+    const loungeHome = path.join(parent, ".agent-lounge");
+    const legacyStore = new AgentLoungeStore({
+      home: legacyHome,
+      projectRoot: await temporaryProject("legacy-project")
+    });
+    const message = await legacyStore.post(messageInput({ topic: "Preserve this lesson" }));
+    await rename(
+      path.join(legacyHome, ".agent-lounge-store"),
+      path.join(legacyHome, ".agent-board-store")
+    );
+
+    expect(await migrateLegacyStoreDirectory(legacyHome, loungeHome)).toBe(true);
+    const loungeStore = new AgentLoungeStore({
+      home: loungeHome,
+      projectRoot: legacyStore.projectRoot
+    });
+    await loungeStore.initialize();
+
+    expect((await loungeStore.get(message.id))?.message.topic).toBe("Preserve this lesson");
+    expect(await stat(path.join(loungeHome, ".agent-lounge-store"))).toBeTruthy();
+    expect(await stat(path.join(loungeHome, "LOUNGE.md"))).toBeTruthy();
+    await expect(stat(legacyHome)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await migrateLegacyStoreDirectory(legacyHome, loungeHome)).toBe(false);
+  });
+
   it("creates a private, inspectable file store", async () => {
     const home = path.join(await temporaryDirectory("private"), "board");
     const projectRoot = await temporaryProject();
-    const store = new AgentBoardStore({ home, projectRoot, client: "Codex Test" });
+    const store = new AgentLoungeStore({ home, projectRoot, client: "Codex Test" });
     const message = await store.post(messageInput());
 
     const report = await store.doctor();
@@ -37,8 +65,8 @@ describe("AgentBoardStore", () => {
     const home = path.join(await temporaryDirectory("scopes"), "board");
     const firstProject = await temporaryProject("first-project");
     const secondProject = await temporaryProject("second-project");
-    const first = new AgentBoardStore({ home, projectRoot: firstProject, client: "first" });
-    const second = new AgentBoardStore({ home, projectRoot: secondProject, client: "second" });
+    const first = new AgentLoungeStore({ home, projectRoot: firstProject, client: "first" });
+    const second = new AgentLoungeStore({ home, projectRoot: secondProject, client: "second" });
 
     await first.post(messageInput({ topic: "Personal preference" }));
     const firstProjectMessage = await first.post(
@@ -59,7 +87,7 @@ describe("AgentBoardStore", () => {
 
   it("supports multi-term, quoted, kind, and pagination filters", async () => {
     const home = path.join(await temporaryDirectory("search"), "board");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     await store.post(
       messageInput({
         kind: "lesson",
@@ -83,7 +111,7 @@ describe("AgentBoardStore", () => {
 
   it("builds threads and prevents cross-board relationships", async () => {
     const home = path.join(await temporaryDirectory("threads"), "board");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     const question = await store.post(messageInput({ kind: "question", topic: "Which command?" }));
     const reply = await store.post(
       messageInput({ kind: "reply", topic: "Use the focused command", reply_to: question.id })
@@ -115,7 +143,7 @@ describe("AgentBoardStore", () => {
 
   it("keeps curation separate, hides by default, and orders pins first", async () => {
     const home = path.join(await temporaryDirectory("curation"), "board");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     const older = await store.post(messageInput({ topic: "Older trusted note" }));
     const newer = await store.post(messageInput({ topic: "Newer note" }));
 
@@ -133,7 +161,7 @@ describe("AgentBoardStore", () => {
 
   it("moves messages and curation to recoverable trash", async () => {
     const home = path.join(await temporaryDirectory("trash"), "board");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     const message = await store.post(messageInput());
     await store.setCuration(message.id, "pinned");
 
@@ -150,7 +178,7 @@ describe("AgentBoardStore", () => {
 
   it("finishes a restore safely after an interrupted final cleanup", async () => {
     const home = path.join(await temporaryDirectory("restore-retry"), "board");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     const message = await store.post(messageInput());
     const trashDirectory = await store.trash(message.id);
     const manifest = JSON.parse(
@@ -166,7 +194,7 @@ describe("AgentBoardStore", () => {
 
   it("rejects a trash manifest that attempts path traversal", async () => {
     const home = path.join(await temporaryDirectory("trash-traversal"), "board");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     const message = await store.post(messageInput());
     const trashDirectory = await store.trash(message.id);
     const manifestPath = path.join(trashDirectory, "manifest.json");
@@ -178,7 +206,7 @@ describe("AgentBoardStore", () => {
 
   it("reports malformed files and unsafe permissions without losing valid messages", async () => {
     const home = path.join(await temporaryDirectory("doctor"), "board");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     expect((await store.doctor()).ok).toBe(false);
     await store.post(messageInput());
     const badDirectory = path.join(
@@ -208,7 +236,7 @@ describe("AgentBoardStore", () => {
 
   it("blocks likely secrets unless a human explicitly overrides the guard", async () => {
     const home = path.join(await temporaryDirectory("secrets"), "board");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     const synthetic = `npm_${"x".repeat(32)}`;
     await expect(store.post(messageInput({ body: synthetic }))).rejects.toThrow(/sensitive data/i);
     const stored = await store.post(messageInput({ body: synthetic }), { allowSensitive: true });
@@ -220,7 +248,7 @@ describe("AgentBoardStore", () => {
     const projectRoot = await temporaryProject();
     const stores = Array.from(
       { length: 8 },
-      (_, index) => new AgentBoardStore({ home, projectRoot, client: `worker-${index}` })
+      (_, index) => new AgentLoungeStore({ home, projectRoot, client: `worker-${index}` })
     );
     const messages = await Promise.all(
       Array.from({ length: 80 }, (_, index) =>
@@ -237,7 +265,7 @@ describe("AgentBoardStore", () => {
   it("purges only a sentinel-marked, narrowly scoped store", async () => {
     const parent = await temporaryDirectory("purge");
     const home = path.join(parent, "board-store");
-    const store = new AgentBoardStore({ home, projectRoot: await temporaryProject() });
+    const store = new AgentLoungeStore({ home, projectRoot: await temporaryProject() });
     await expect(store.purgeStore()).rejects.toThrow(/sentinel/i);
     await store.initialize();
     await store.purgeStore();

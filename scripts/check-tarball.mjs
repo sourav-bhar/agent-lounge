@@ -8,7 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const temporaryRoot = await mkdtemp(path.join(tmpdir(), "agent-board-package-test-"));
+const temporaryRoot = await mkdtemp(path.join(tmpdir(), "agent-lounge-package-test-"));
 let tarballPath;
 
 try {
@@ -28,16 +28,9 @@ try {
     prefix,
     "node_modules",
     ".bin",
-    process.platform === "win32" ? "agent-board.cmd" : "agent-board"
+    process.platform === "win32" ? "agent-lounge.cmd" : "agent-lounge"
   );
-  const installedScript = path.join(
-    prefix,
-    "node_modules",
-    "@souravbhar",
-    "agent-board",
-    "dist",
-    "cli.js"
-  );
+  const installedScript = path.join(prefix, "node_modules", "agent-lounge", "dist", "cli.js");
   const cliCommand = process.platform === "win32" ? process.execPath : executable;
   const cliPrefix = process.platform === "win32" ? [installedScript] : [];
   const board = path.join(temporaryRoot, "board");
@@ -113,7 +106,7 @@ try {
     await mcpClient.connect(transport);
     const tools = await mcpClient.listTools();
     const read = await mcpClient.callTool({
-      name: "agent_board_read",
+      name: "agent_lounge_read",
       arguments: { scope: "all", response_format: "json" }
     });
     if (tools.tools.length !== 3 || read.isError || read.structuredContent?.total !== 1) {
@@ -123,7 +116,7 @@ try {
     await mcpClient.close();
   }
 
-  console.log(`Clean tarball install passed for @souravbhar/agent-board@${version.stdout.trim()}.`);
+  console.log(`Clean tarball install passed for agent-lounge@${version.stdout.trim()}.`);
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
   if (tarballPath) await rm(tarballPath, { force: true });

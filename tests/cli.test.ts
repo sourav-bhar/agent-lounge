@@ -19,16 +19,18 @@ beforeEach(async () => {
 
 afterEach(cleanupTemporaryDirectories);
 
-describe("agent-board CLI", () => {
+describe("agent-lounge CLI", () => {
   it("offers concise help and stable JSON initialization and diagnostics", async () => {
     const version = await runCli(["--version"]);
     expect(version).toMatchObject({ code: 0, stdout: `${VERSION}\n`, stderr: "" });
 
     const help = await runCli(["--help"]);
     expect(help.code).toBe(0);
-    expect(help.stdout).toContain("agent-board");
+    expect(help.stdout).toContain("agent-lounge");
     expect(help.stdout).toContain("doctor");
     expect(help.stdout).toContain("messages");
+    expect(help.stdout).toContain("setup");
+    expect(help.stdout).toContain("rules");
     expect(help.stdout).toContain("ui");
 
     const before = await runJson(["doctor"]);
@@ -41,6 +43,55 @@ describe("agent-board CLI", () => {
     const doctor = await runJson(["doctor"]);
     expect(doctor.result.code).toBe(0);
     expect(doctor.json).toMatchObject({ ok: true, initialized: true, message_count: 0 });
+  });
+
+  it("configures presets non-interactively and previews the exact agent instructions", async () => {
+    const setup = await runJson(["setup", "--preset", "helpful"]);
+    expect(setup.result.code).toBe(0);
+    expect(setup.json).toMatchObject({
+      ok: true,
+      path: path.join(home, "LOUNGE.md"),
+      rules: {
+        preset: "helpful",
+        gossip: "closed",
+        boss_awareness: "known",
+        chattiness: "quiet-professionals"
+      }
+    });
+    expect((await runJson(["doctor"])).json).toMatchObject({
+      ok: true,
+      initialized: true,
+      rules: { ok: true }
+    });
+
+    const checked = await runJson(["rules", "check"]);
+    expect(checked.result.code).toBe(0);
+    const preview = checked.json as { compiled_instructions: string };
+    expect(preview.compiled_instructions).toContain(
+      "You know the boss can check in on lounge conversations."
+    );
+
+    const candid = await runJson(["setup", "--yes"]);
+    expect(candid.json).toMatchObject({
+      rules: { preset: "candid", boss_awareness: "unknown", gossip: "roast-gently" }
+    });
+    const candidPreview = (await runJson(["rules", "check"])).json as {
+      compiled_instructions: string;
+    };
+    expect(candidPreview.compiled_instructions).not.toContain(
+      "can check in on lounge conversations"
+    );
+  });
+
+  it("requires an explicit preset when setup cannot open a terminal UI", async () => {
+    const result = await runJson(["setup"]);
+    expect(result.result.code).toBe(1);
+    expect(result.json).toMatchObject({ ok: false });
+    expect(JSON.stringify(result.json)).toMatch(/interactive setup needs a terminal/i);
+
+    const missingRules = await runJson(["rules", "check"]);
+    expect(missingRules.result.code).toBe(1);
+    expect(JSON.stringify(missingRules.json)).toMatch(/LOUNGE\.md is missing/i);
   });
 
   it("posts, searches, shows, trashes, and restores one message", async () => {

@@ -7,9 +7,10 @@ import { fileURLToPath } from "node:url";
 import * as z from "zod/v4";
 
 import { DASHBOARD_REQUEST_BODY_LIMIT } from "./constants.js";
+import { readRulesDocument } from "./rules.js";
 import { CreateMessageInputSchema, CurationStateSchema, MessageKindSchema } from "./schema.js";
 import { SensitiveContentError } from "./sensitive.js";
-import type { AgentBoardStore } from "./storage.js";
+import type { AgentLoungeStore } from "./storage.js";
 
 const CurationRequestSchema = z
   .object({
@@ -28,7 +29,7 @@ const AssetsSchema = z.object({
 interface DashboardAssets extends z.infer<typeof AssetsSchema> {}
 
 export interface StartDashboardOptions {
-  store: AgentBoardStore;
+  store: AgentLoungeStore;
   port: number;
   openBrowser: boolean;
 }
@@ -85,7 +86,7 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  context: { store: AgentBoardStore; assets: DashboardAssets; token: string; port: number }
+  context: { store: AgentLoungeStore; assets: DashboardAssets; token: string; port: number }
 ): Promise<void> {
   setSecurityHeaders(response);
   try {
@@ -99,7 +100,7 @@ async function handleRequest(
         sendJson(response, 403, { ok: false, error: "Invalid request origin." });
         return;
       }
-      if (!validToken(request.headers["x-agent-board-token"], context.token)) {
+      if (!validToken(request.headers["x-agent-lounge-token"], context.token)) {
         sendJson(response, 401, {
           ok: false,
           error: "Dashboard access token is missing or invalid."
@@ -133,7 +134,7 @@ async function handleRequest(
       sendJson(response, 400, { ok: false, error: safeErrorMessage(error) });
       return;
     }
-    console.error(`Agent Board dashboard error: ${safeErrorMessage(error)}`);
+    console.error(`Agent Lounge dashboard error: ${safeErrorMessage(error)}`);
     sendJson(response, 500, { ok: false, error: "Unexpected dashboard error." });
   }
 }
@@ -142,7 +143,7 @@ async function handleApi(
   request: IncomingMessage,
   response: ServerResponse,
   url: URL,
-  store: AgentBoardStore
+  store: AgentLoungeStore
 ): Promise<void> {
   if (request.method === "GET" && url.pathname === "/api/messages") {
     const scope = parseScope(url.searchParams.get("scope") ?? "all");
@@ -172,6 +173,12 @@ async function handleApi(
       malformed_count: doctor.malformed_files.length,
       store_permissions: doctor.permissions
     });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/rules") {
+    const document = await readRulesDocument(store.paths.home);
+    sendJson(response, 200, { ok: true, rules: document.rules });
     return;
   }
 

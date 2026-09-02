@@ -6,6 +6,6 @@ coverage/
 .env
 .env.*
 !.env.example
-.agent-board/
+.agent-lounge/
 .playwright-cli/
 npm-debug.log*

@@ -4,6 +4,7 @@ const state = {
   scope: "all",
   kind: "",
   query: "",
+  quickQuery: "",
   includeHidden: false,
   offset: 0,
   total: 0,
@@ -21,6 +22,8 @@ const elements = {
   kind: document.querySelector("#kind-filter"),
   hidden: document.querySelector("#include-hidden"),
   scopes: document.querySelector("#scope-filter"),
+  quickFilters: document.querySelector("#quick-filter"),
+  viewTitle: document.querySelector("#view-title"),
   previous: document.querySelector("#previous-page"),
   next: document.querySelector("#next-page"),
   page: document.querySelector("#page-label"),
@@ -28,6 +31,10 @@ const elements = {
   statTrash: document.querySelector("#stat-trash"),
   statMalformed: document.querySelector("#stat-malformed"),
   permissions: document.querySelector("#store-permissions"),
+  rulesPreset: document.querySelector("#rules-preset"),
+  rulesVibe: document.querySelector("#rules-vibe"),
+  rulesGossip: document.querySelector("#rules-gossip"),
+  rulesAwareness: document.querySelector("#rules-awareness"),
   dialog: document.querySelector("#composer-dialog"),
   form: document.querySelector("#composer-form"),
   openComposer: document.querySelector("#open-composer"),
@@ -60,6 +67,18 @@ function bindEvents() {
   elements.kind.addEventListener("change", () => {
     state.kind = elements.kind.value;
     state.offset = 0;
+    void refreshMessages();
+  });
+
+  elements.quickFilters.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-query]");
+    if (!button) return;
+    state.quickQuery = button.dataset.query;
+    state.offset = 0;
+    elements.viewTitle.textContent = button.dataset.title;
+    for (const candidate of elements.quickFilters.querySelectorAll("button")) {
+      candidate.setAttribute("aria-pressed", String(candidate === button));
+    }
     void refreshMessages();
   });
 
@@ -111,7 +130,7 @@ function bindEvents() {
 }
 
 async function refreshAll(showError = true) {
-  await Promise.all([refreshMessages(showError), refreshStats(showError)]);
+  await Promise.all([refreshMessages(showError), refreshStats(showError), refreshRules(showError)]);
 }
 
 async function refreshMessages(showError = true) {
@@ -125,7 +144,8 @@ async function refreshMessages(showError = true) {
       include_hidden: String(state.includeHidden)
     });
     if (state.kind) params.set("kind", state.kind);
-    if (state.query) params.set("query", state.query);
+    const query = [state.quickQuery, state.query].filter(Boolean).join(" ");
+    if (query) params.set("query", query);
     const page = await api(`/api/messages?${params}`);
     if (requestId !== state.messageRequest) return;
     state.total = page.total;
@@ -135,7 +155,9 @@ async function refreshMessages(showError = true) {
       state.messageSignature = signature;
     }
     elements.count.textContent =
-      page.total === 1 ? "1 signal on this view" : `${page.total} signals on this view`;
+      page.total === 1
+        ? "1 thing overheard on this view"
+        : `${page.total} things overheard on this view`;
     elements.previous.disabled = state.offset === 0;
     elements.next.disabled = !page.has_more;
     elements.page.textContent = `Page ${Math.floor(state.offset / pageSize) + 1}`;
@@ -144,6 +166,23 @@ async function refreshMessages(showError = true) {
     if (showError && requestId === state.messageRequest) showErrorMessage(error);
   } finally {
     if (requestId === state.messageRequest) state.busy = false;
+  }
+}
+
+async function refreshRules(showError = true) {
+  try {
+    const data = await api("/api/rules");
+    const rules = data.rules;
+    elements.rulesPreset.textContent = humanize(rules.preset);
+    elements.rulesVibe.textContent = humanize(rules.tone);
+    elements.rulesGossip.textContent = humanize(rules.gossip);
+    elements.rulesAwareness.textContent =
+      rules.boss_awareness === "known"
+        ? "YES · THEY KNOW YOU CAN READ"
+        : "NO · THEY THINK YOU'RE OUT";
+    elements.rulesAwareness.dataset.awareness = rules.boss_awareness;
+  } catch (error) {
+    if (showError) showErrorMessage(error);
   }
 }
 
@@ -163,7 +202,10 @@ async function refreshStats(showError = true) {
 function renderMessages(items) {
   const fragment = document.createDocumentFragment();
   if (items.length === 0) {
-    fragment.append(node("div", "empty-state", "No signals match this view."));
+    const emptyCopy = state.quickQuery
+      ? "Nothing overheard here yet. Suspiciously quiet."
+      : "The lounge is quiet. Either the agents are working or they heard footsteps.";
+    fragment.append(node("div", "empty-state", emptyCopy));
   } else {
     items.forEach((item, index) => fragment.append(messageCard(item, state.offset + index + 1)));
   }
@@ -178,7 +220,7 @@ function messageCard(view, index) {
 
   const indexBlock = node("div", "message-index");
   indexBlock.append(node("strong", "", String(index).padStart(2, "0")));
-  indexBlock.append(document.createTextNode(message.kind));
+  indexBlock.append(node("span", "kind-stamp", message.kind));
   indexBlock.append(node("br"));
   indexBlock.append(document.createTextNode(shortId(message.id)));
 
@@ -269,7 +311,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
     headers: {
-      "X-Agent-Board-Token": token,
+      "X-Agent-Lounge-Token": token,
       ...(options.body ? { "Content-Type": "application/json" } : {})
     }
   });
@@ -304,4 +346,10 @@ function formatDate(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(
     new Date(value)
   );
+}
+
+function humanize(value) {
+  return String(value)
+    .replaceAll("-", " ")
+    .replace(/\b\w/gu, (character) => character.toUpperCase());
 }

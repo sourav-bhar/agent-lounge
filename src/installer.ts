@@ -5,10 +5,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as z from "zod/v4";
 
-import { MCP_SERVER_CONFIG_NAME, PACKAGE_NAME, STORE_SCHEMA_VERSION } from "./constants.js";
+import {
+  LEGACY_MCP_SERVER_CONFIG_NAME,
+  LEGACY_PACKAGE_NAME,
+  MCP_SERVER_CONFIG_NAME,
+  PACKAGE_NAME,
+  STORE_SCHEMA_VERSION
+} from "./constants.js";
 import { atomicWriteJson, pathExists } from "./fs-utils.js";
-import { getStorePaths, resolveStoreHome } from "./paths.js";
-import { AgentBoardStore } from "./storage.js";
+import { defaultStoreHome, getStorePaths, legacyStoreHome, resolveStoreHome } from "./paths.js";
+import { writeRulesDocument, type LoungeRulesDocument } from "./rules.js";
+import { AgentLoungeStore } from "./storage.js";
 import { VERSION } from "./version.js";
 
 export const AgentClientSchema = z.enum(["codex", "claude"]);
@@ -48,12 +55,20 @@ export interface InstallOptions {
   clients?: AgentClient[];
   dryRun?: boolean;
   force?: boolean;
+  rulesDocument?: LoungeRulesDocument;
 }
 
 export interface InstallAction {
   client: AgentClient;
   action:
-    "add_mcp" | "replace_mcp" | "install_skill" | "update_skill" | "remove_mcp" | "remove_skill";
+    | "add_mcp"
+    | "replace_mcp"
+    | "migrate_mcp"
+    | "install_skill"
+    | "update_skill"
+    | "remove_legacy_skill"
+    | "remove_mcp"
+    | "remove_skill";
   status: "planned" | "done" | "skipped";
   detail: string;
 }
@@ -64,6 +79,7 @@ export interface InstallReport {
   clients: AgentClient[];
   actions: InstallAction[];
   warnings: string[];
+  rules_path: string;
 }
 
 export interface InstallationHealth {
@@ -76,9 +92,9 @@ export interface InstallationHealth {
   issues: string[];
 }
 
-export async function installAgentBoard(options: InstallOptions = {}): Promise<InstallReport> {
+export async function installAgentLounge(options: InstallOptions = {}): Promise<InstallReport> {
   const paths = getStorePaths(resolveStoreHome(options.home));
-  const state = await readInstallState(paths.installState);
+  const state = await readInstallStateForInstall(paths.home, paths.installState);
   const clients = options.clients ?? detectClients();
   if (clients.length === 0) {
     throw new Error(
@@ -91,8 +107,10 @@ export async function installAgentBoard(options: InstallOptions = {}): Promise<I
   const plans: Array<{
     client: AgentClient;
     status: McpServerStatus;
+    legacyStatus: McpServerStatus;
     addCommand: string[];
     skillPath: string;
+    legacySkillPath: string;
   }> = [];
 
   for (const client of [...new Set(clients)]) {
@@ -100,22 +118,43 @@ export async function installAgentBoard(options: InstallOptions = {}): Promise<I
     if (!(await commandAvailable(clientCommand(client)))) {
       throw new Error(`${displayClient(client)} is not installed or is not available on PATH.`);
     }
-    const status = await inspectMcpServer(client);
+    const [status, legacyStatus] = await Promise.all([
+      inspectMcpServer(client, MCP_SERVER_CONFIG_NAME, "current"),
+      inspectMcpServer(client, LEGACY_MCP_SERVER_CONFIG_NAME, "legacy")
+    ]);
     if (status.exists && !status.matchesManagedCommand && !options.force) {
       throw new Error(
         `${displayClient(client)} already has an MCP server named '${MCP_SERVER_CONFIG_NAME}' with a different command. Re-run with --force only if replacing it is intentional.`
       );
     }
     const skillPath = skillTarget(client);
+    const legacySkillPath = legacySkillTarget(client);
     await assertSkillInstallable(client, skillPath, options.force ?? false);
-    plans.push({ client, status, addCommand: mcpAddCommand(client), skillPath });
+    plans.push({
+      client,
+      status,
+      legacyStatus,
+      addCommand: mcpAddCommand(client),
+      skillPath,
+      legacySkillPath
+    });
   }
 
   if (!options.dryRun) {
-    await new AgentBoardStore({ home: paths.home, client: "installer" }).initialize();
+    await new AgentLoungeStore({ home: paths.home, client: "installer" }).initialize();
+    if (options.rulesDocument) await writeRulesDocument(options.rulesDocument, paths.home);
   }
 
-  for (const { client, status, addCommand, skillPath } of plans) {
+  for (const { client, status, legacyStatus, addCommand, skillPath, legacySkillPath } of plans) {
+    if (legacyStatus.exists && legacyStatus.matchesManagedCommand) {
+      actions.push({
+        client,
+        action: "migrate_mcp",
+        status: options.dryRun ? "planned" : "done",
+        detail: `${LEGACY_MCP_SERVER_CONFIG_NAME} → ${MCP_SERVER_CONFIG_NAME}`
+      });
+      if (!options.dryRun) await removeMcpServer(client, LEGACY_MCP_SERVER_CONFIG_NAME);
+    }
     if (status.exists) {
       actions.push({
         client,
@@ -123,7 +162,7 @@ export async function installAgentBoard(options: InstallOptions = {}): Promise<I
         status: options.dryRun ? "planned" : "done",
         detail: `Replace ${MCP_SERVER_CONFIG_NAME} with ${PACKAGE_NAME}@${VERSION}`
       });
-      if (!options.dryRun) await removeMcpServer(client);
+      if (!options.dryRun) await removeMcpServer(client, MCP_SERVER_CONFIG_NAME);
     }
 
     if (!options.dryRun) await runCommand(addCommand[0], addCommand.slice(1));
@@ -146,6 +185,16 @@ export async function installAgentBoard(options: InstallOptions = {}): Promise<I
       detail: skillPath
     });
 
+    if (await isLegacyManagedSkill(legacySkillPath)) {
+      if (!options.dryRun) await rm(legacySkillPath, { recursive: true, force: false });
+      actions.push({
+        client,
+        action: "remove_legacy_skill",
+        status: options.dryRun ? "planned" : "done",
+        detail: legacySkillPath
+      });
+    }
+
     nextState.clients[client] = {
       package_version: VERSION,
       installed_at: new Date().toISOString(),
@@ -156,7 +205,14 @@ export async function installAgentBoard(options: InstallOptions = {}): Promise<I
     if (!options.dryRun) await atomicWriteJson(paths.installState, nextState);
   }
 
-  return { ok: true, package_version: VERSION, clients, actions, warnings };
+  return {
+    ok: true,
+    package_version: VERSION,
+    clients,
+    actions,
+    warnings,
+    rules_path: paths.rules
+  };
 }
 
 async function assertSkillInstallable(
@@ -166,12 +222,12 @@ async function assertSkillInstallable(
 ): Promise<void> {
   if ((await pathExists(target)) && !(await isManagedSkill(target)) && !force) {
     throw new Error(
-      `${displayClient(client)} already has an unrecognized agent-board skill at ${target}. Re-run with --force to preserve it as a timestamped backup.`
+      `${displayClient(client)} already has an unrecognized agent-lounge skill at ${target}. Re-run with --force to preserve it as a timestamped backup.`
     );
   }
 }
 
-export async function uninstallAgentBoard(options: InstallOptions = {}): Promise<InstallReport> {
+export async function uninstallAgentLounge(options: InstallOptions = {}): Promise<InstallReport> {
   const paths = getStorePaths(resolveStoreHome(options.home));
   const state = await readInstallState(paths.installState);
   const managedClients = (Object.keys(state.clients) as AgentClient[]).filter(
@@ -189,19 +245,21 @@ export async function uninstallAgentBoard(options: InstallOptions = {}): Promise
         client,
         action: "remove_mcp",
         status: "skipped",
-        detail: "No Agent Board-managed installation was recorded."
+        detail: "No Agent Lounge-managed installation was recorded."
       });
       continue;
     }
     if (await commandAvailable(clientCommand(client))) {
-      const status = await inspectMcpServer(client);
+      const status = await inspectMcpServer(client, MCP_SERVER_CONFIG_NAME, "current");
       if (status.exists && !status.matchesManagedCommand && !options.force) {
         warnings.push(
-          `Preserved ${displayClient(client)}'s '${MCP_SERVER_CONFIG_NAME}' MCP server because its command is no longer managed by Agent Board. Re-run with --force to remove it.`
+          `Preserved ${displayClient(client)}'s '${MCP_SERVER_CONFIG_NAME}' MCP server because its command is no longer managed by Agent Lounge. Re-run with --force to remove it.`
         );
         continue;
       }
-      if (!options.dryRun && status.exists) await removeMcpServer(client);
+      if (!options.dryRun && status.exists) {
+        await removeMcpServer(client, MCP_SERVER_CONFIG_NAME);
+      }
       actions.push({
         client,
         action: "remove_mcp",
@@ -240,7 +298,8 @@ export async function uninstallAgentBoard(options: InstallOptions = {}): Promise
     package_version: VERSION,
     clients,
     actions,
-    warnings
+    warnings,
+    rules_path: paths.rules
   };
 }
 
@@ -260,7 +319,7 @@ export async function getInstallationHealth(home?: string): Promise<Installation
       const managed = state.clients[client]!;
       const available = await commandAvailable(clientCommand(client));
       const status = available
-        ? await inspectMcpServer(client)
+        ? await inspectMcpServer(client, MCP_SERVER_CONFIG_NAME, "current")
         : { exists: false, matchesManagedCommand: false };
       const skillManaged = await isManagedSkill(managed.skill_path);
       const issues = [
@@ -303,7 +362,7 @@ function mcpAddCommand(client: AgentClient): string[] {
       "add",
       MCP_SERVER_CONFIG_NAME,
       "--env",
-      "AGENT_BOARD_CLIENT=codex",
+      "AGENT_LOUNGE_CLIENT=codex",
       "--",
       ...serverCommand
     ];
@@ -318,34 +377,42 @@ function mcpAddCommand(client: AgentClient): string[] {
     "stdio",
     MCP_SERVER_CONFIG_NAME,
     "--env",
-    "AGENT_BOARD_CLIENT=claude-code",
+    "AGENT_LOUNGE_CLIENT=claude-code",
     "--",
     ...serverCommand
   ];
 }
 
-async function inspectMcpServer(client: AgentClient): Promise<McpServerStatus> {
+async function inspectMcpServer(
+  client: AgentClient,
+  configName: string,
+  expected: "current" | "legacy"
+): Promise<McpServerStatus> {
   if (!(await commandAvailable(clientCommand(client)))) {
     return { exists: false, matchesManagedCommand: false };
   }
   const args =
-    client === "codex"
-      ? ["mcp", "get", MCP_SERVER_CONFIG_NAME, "--json"]
-      : ["mcp", "get", MCP_SERVER_CONFIG_NAME];
+    client === "codex" ? ["mcp", "get", configName, "--json"] : ["mcp", "get", configName];
   const result = await runCommandResult(clientCommand(client), args);
   if (result.code !== 0) return { exists: false, matchesManagedCommand: false };
   return {
     exists: true,
     matchesManagedCommand:
-      client === "codex" ? codexConfigMatches(result.stdout) : claudeConfigMatches(result.stdout)
+      expected === "legacy"
+        ? client === "codex"
+          ? legacyCodexConfigMatches(result.stdout)
+          : legacyClaudeConfigMatches(result.stdout)
+        : client === "codex"
+          ? codexConfigMatches(result.stdout)
+          : claudeConfigMatches(result.stdout)
   };
 }
 
-async function removeMcpServer(client: AgentClient): Promise<void> {
+async function removeMcpServer(client: AgentClient, configName: string): Promise<void> {
   const args =
     client === "codex"
-      ? ["mcp", "remove", MCP_SERVER_CONFIG_NAME]
-      : ["mcp", "remove", MCP_SERVER_CONFIG_NAME, "--scope", "user"];
+      ? ["mcp", "remove", configName]
+      : ["mcp", "remove", configName, "--scope", "user"];
   await runCommand(clientCommand(client), args);
 }
 
@@ -358,13 +425,13 @@ async function installSkill(
     path.dirname(fileURLToPath(import.meta.url)),
     "..",
     "skills",
-    "agent-board"
+    "agent-lounge"
   );
   const exists = await pathExists(target);
   if (exists && !(await isManagedSkill(target))) {
     if (!options.force) {
       throw new Error(
-        `${displayClient(client)} already has an unrecognized agent-board skill at ${target}. Re-run with --force to preserve it as a timestamped backup.`
+        `${displayClient(client)} already has an unrecognized agent-lounge skill at ${target}. Re-run with --force to preserve it as a timestamped backup.`
       );
     }
     if (!options.dryRun) {
@@ -385,6 +452,15 @@ async function installSkill(
 async function isManagedSkill(directory: string): Promise<boolean> {
   try {
     const content = await readFile(path.join(directory, "SKILL.md"), "utf8");
+    return content.includes("managed-by: agent-lounge");
+  } catch {
+    return false;
+  }
+}
+
+async function isLegacyManagedSkill(directory: string): Promise<boolean> {
+  try {
+    const content = await readFile(path.join(directory, "SKILL.md"), "utf8");
     return content.includes("managed-by: agent-board");
   } catch {
     return false;
@@ -396,12 +472,16 @@ function skillTarget(client: AgentClient): string {
     const root = process.env.CODEX_HOME
       ? path.resolve(process.env.CODEX_HOME)
       : path.join(homedir(), ".codex");
-    return path.join(root, "skills", "agent-board");
+    return path.join(root, "skills", "agent-lounge");
   }
   const root = process.env.CLAUDE_CONFIG_DIR
     ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
     : path.join(homedir(), ".claude");
-  return path.join(root, "skills", "agent-board");
+  return path.join(root, "skills", "agent-lounge");
+}
+
+function legacySkillTarget(client: AgentClient): string {
+  return path.join(path.dirname(skillTarget(client)), "agent-board");
 }
 
 function defaultInstallState(): InstallState {
@@ -420,8 +500,20 @@ async function readInstallState(filePath: string): Promise<InstallState> {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       return defaultInstallState();
     }
-    throw new Error(`Agent Board installation state is invalid: ${safeError(error)}`);
+    throw new Error(`Agent Lounge installation state is invalid: ${safeError(error)}`);
   }
+}
+
+async function readInstallStateForInstall(
+  resolvedHome: string,
+  installStatePath: string
+): Promise<InstallState> {
+  if (await pathExists(installStatePath)) return readInstallState(installStatePath);
+  if (resolvedHome === defaultStoreHome()) {
+    const legacyPath = getStorePaths(legacyStoreHome()).installState;
+    if (await pathExists(legacyPath)) return readInstallState(legacyPath);
+  }
+  return defaultInstallState();
 }
 
 function clientCommand(client: AgentClient): string {
@@ -506,7 +598,7 @@ function codexConfigMatches(stdout: string): boolean {
       arraysEqual(record.args, ["-y", `${PACKAGE_NAME}@${VERSION}`, "mcp"]) &&
       !!env &&
       typeof env === "object" &&
-      (env as Record<string, unknown>).AGENT_BOARD_CLIENT === "codex"
+      (env as Record<string, unknown>).AGENT_LOUNGE_CLIENT === "codex"
     );
   } catch {
     return false;
@@ -519,7 +611,52 @@ function claudeConfigMatches(stdout: string): boolean {
     lines.includes("Scope: User config (available in all your projects)") &&
     lines.includes("Command: npx") &&
     lines.includes(`Args: -y ${PACKAGE_NAME}@${VERSION} mcp`) &&
+    lines.includes("AGENT_LOUNGE_CLIENT=claude-code")
+  );
+}
+
+function legacyCodexConfigMatches(stdout: string): boolean {
+  try {
+    const value = JSON.parse(stdout) as unknown;
+    if (!value || typeof value !== "object") return false;
+    const transport = (value as Record<string, unknown>).transport;
+    if (!transport || typeof transport !== "object") return false;
+    const record = transport as Record<string, unknown>;
+    const args = record.args;
+    const env = record.env;
+    return (
+      record.type === "stdio" &&
+      record.command === "npx" &&
+      Array.isArray(args) &&
+      args.length === 3 &&
+      args[0] === "-y" &&
+      typeof args[1] === "string" &&
+      legacyPackageSpec(args[1]) &&
+      args[2] === "mcp" &&
+      !!env &&
+      typeof env === "object" &&
+      (env as Record<string, unknown>).AGENT_BOARD_CLIENT === "codex"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function legacyClaudeConfigMatches(stdout: string): boolean {
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim());
+  const argsLine = lines.find((line) => line.startsWith("Args: -y "));
+  return (
+    lines.includes("Scope: User config (available in all your projects)") &&
+    lines.includes("Command: npx") &&
+    !!argsLine &&
+    /^Args: -y @souravbhar\/agent-board@[^\s]+ mcp$/u.test(argsLine) &&
     lines.includes("AGENT_BOARD_CLIENT=claude-code")
+  );
+}
+
+function legacyPackageSpec(value: string): boolean {
+  return (
+    value.startsWith(`${LEGACY_PACKAGE_NAME}@`) && value.length > LEGACY_PACKAGE_NAME.length + 1
   );
 }
 

@@ -7,7 +7,7 @@ import type { CreateMessageInput } from "../src/schema.js";
 const temporaryDirectories = new Set<string>();
 
 export async function temporaryDirectory(label: string): Promise<string> {
-  const directory = await mkdtemp(path.join(tmpdir(), `agent-board-${label}-`));
+  const directory = await mkdtemp(path.join(tmpdir(), `agent-lounge-${label}-`));
   temporaryDirectories.add(directory);
   return directory;
 }
