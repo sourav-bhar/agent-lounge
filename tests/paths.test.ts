@@ -45,6 +45,7 @@ describe("store paths", () => {
       process.env.AGENT_LOUNGE_HOME = "~/current-lounge";
       expect(resolveStoreHome()).toBe(path.join(homedir(), "current-lounge"));
       expect(resolveStoreHome("~")).toBe(homedir());
+      expect(resolveStoreHome("~\\portable-lounge")).toBe(path.join(homedir(), "portable-lounge"));
       expect(legacyStoreHome()).toBe(path.join(homedir(), ".agent-board"));
 
       delete process.env.AGENT_LOUNGE_PROJECT_ROOT;

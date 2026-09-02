@@ -99,7 +99,7 @@ export function assertSafePurgeTarget(target: string): void {
 
 function expandHome(value: string): string {
   if (value === "~") return homedir();
-  if (value.startsWith(`~${path.sep}`)) return path.join(homedir(), value.slice(2));
+  if (/^~[\\/]/u.test(value)) return path.join(homedir(), value.slice(2));
   return value;
 }
 
