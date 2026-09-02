@@ -154,7 +154,7 @@ async function refreshStats(showError = true) {
     elements.statTrash.textContent = String(stats.trashed_count);
     elements.statMalformed.textContent = String(stats.malformed_count);
     elements.permissions.textContent =
-      stats.store_permissions === "0700" ? "PRIVATE" : (stats.store_permissions ?? "UNKNOWN");
+      stats.store_permissions === "0700" ? "PRIVATE" : (stats.store_permissions ?? "OS MANAGED");
   } catch (error) {
     if (showError) showErrorMessage(error);
   }

@@ -5,6 +5,7 @@ import path from "node:path";
 import { STORE_SCHEMA_VERSION } from "./constants.js";
 import {
   atomicWriteJson,
+  atomicWriteJsonIfAbsent,
   chmodPrivateDirectory,
   isNodeError,
   pathExists,
@@ -91,13 +92,11 @@ export class AgentBoardStore {
       mkdir(this.paths.projectsRoot, { recursive: true, mode: 0o700 }),
       mkdir(this.paths.trashRoot, { recursive: true, mode: 0o700 })
     ]);
-    if (!(await pathExists(this.paths.sentinel))) {
-      await atomicWriteJson(this.paths.sentinel, {
-        schema_version: STORE_SCHEMA_VERSION,
-        created_at: new Date().toISOString(),
-        product: "agent-board"
-      });
-    }
+    await atomicWriteJsonIfAbsent(this.paths.sentinel, {
+      schema_version: STORE_SCHEMA_VERSION,
+      created_at: new Date().toISOString(),
+      product: "agent-board"
+    });
   }
 
   async post(
@@ -143,7 +142,7 @@ export class AgentBoardStore {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     if (project) {
       const descriptor = path.join(boardRoot, "project.json");
-      if (!(await pathExists(descriptor))) await atomicWriteJson(descriptor, project);
+      await atomicWriteJsonIfAbsent(descriptor, project);
     }
     const filename = `${compactTimestamp(now)}_${message.id}.json`;
     await atomicWriteJson(path.join(directory, filename), message);
@@ -295,10 +294,10 @@ export class AgentBoardStore {
     const initialized = await pathExists(this.paths.sentinel);
     const warnings: string[] = [];
     let permissions: string | null = null;
-    if (await pathExists(this.paths.home)) {
+    if ((await pathExists(this.paths.home)) && process.platform !== "win32") {
       const info = await stat(this.paths.home);
       permissions = `0${(info.mode & 0o777).toString(8)}`;
-      if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+      if ((info.mode & 0o077) !== 0) {
         warnings.push(
           "The store is readable or writable by other local users; expected mode 0700."
         );
