@@ -121,7 +121,7 @@ export async function installAgentBoard(options: InstallOptions = {}): Promise<I
         client,
         action: "replace_mcp",
         status: options.dryRun ? "planned" : "done",
-        detail: `Replace ${MCP_SERVER_CONFIG_NAME} with agent-board@${VERSION}`
+        detail: `Replace ${MCP_SERVER_CONFIG_NAME} with ${PACKAGE_NAME}@${VERSION}`
       });
       if (!options.dryRun) await removeMcpServer(client);
     }

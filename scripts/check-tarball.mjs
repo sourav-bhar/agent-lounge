@@ -30,7 +30,14 @@ try {
     ".bin",
     process.platform === "win32" ? "agent-board.cmd" : "agent-board"
   );
-  const installedScript = path.join(prefix, "node_modules", "agent-board", "dist", "cli.js");
+  const installedScript = path.join(
+    prefix,
+    "node_modules",
+    "@souravbhar",
+    "agent-board",
+    "dist",
+    "cli.js"
+  );
   const cliCommand = process.platform === "win32" ? process.execPath : executable;
   const cliPrefix = process.platform === "win32" ? [installedScript] : [];
   const board = path.join(temporaryRoot, "board");
@@ -116,7 +123,7 @@ try {
     await mcpClient.close();
   }
 
-  console.log(`Clean tarball install passed for agent-board@${version.stdout.trim()}.`);
+  console.log(`Clean tarball install passed for @souravbhar/agent-board@${version.stdout.trim()}.`);
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
   if (tarballPath) await rm(tarballPath, { force: true });

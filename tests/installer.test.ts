@@ -9,6 +9,7 @@ import {
   installAgentBoard,
   uninstallAgentBoard
 } from "../src/installer.js";
+import { PACKAGE_NAME } from "../src/constants.js";
 import { VERSION } from "../src/version.js";
 import { cleanupTemporaryDirectories, temporaryDirectory } from "./helpers.js";
 
@@ -104,7 +105,7 @@ describe("agent client installer", () => {
         "--",
         "npx",
         "-y",
-        `agent-board@${VERSION}`,
+        `${PACKAGE_NAME}@${VERSION}`,
         "mcp"
       ]
     });
@@ -123,7 +124,7 @@ describe("agent client installer", () => {
         "--",
         "npx",
         "-y",
-        `agent-board@${VERSION}`,
+        `${PACKAGE_NAME}@${VERSION}`,
         "mcp"
       ]
     });
@@ -273,7 +274,7 @@ if (args[1] === "get") {
       transport: {
         type: "stdio",
         command: managed ? "npx" : "different-command",
-        args: managed ? ["-y", "agent-board@" + version, "mcp"] : ["--other"],
+        args: managed ? ["-y", "@souravbhar/agent-board@" + version, "mcp"] : ["--other"],
         env: { AGENT_BOARD_CLIENT: managed ? "codex" : "other" }
       }
     }));
@@ -285,7 +286,8 @@ if (args[1] === "get") {
       "  Status: " + (managed ? "Connected" : "Failed"),
       "  Type: stdio",
       "  Command: " + (managed ? "npx" : "different-command"),
-      "  Args: " + (managed ? "-y agent-board@" + version + " mcp" : "--other"),
+      "  Args: " +
+        (managed ? "-y @souravbhar/agent-board@" + version + " mcp" : "--other"),
       "  Environment:",
       "    AGENT_BOARD_CLIENT=" + (managed ? "claude-code" : "other")
     ].join("\\n"));

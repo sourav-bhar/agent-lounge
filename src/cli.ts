@@ -5,7 +5,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { Command, CommanderError, Option } from "commander";
 import pc from "picocolors";
 
-import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from "./constants.js";
+import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PACKAGE_NAME } from "./constants.js";
 import {
   formatMessage,
   formatPage,
@@ -308,7 +308,7 @@ function buildProgram(): Command {
       emit(
         command,
         { ok: true, message_id: messageId, recoverable: true },
-        `Moved ${terminalSafe(messageId)} to trash. Restore with: npx -y agent-board@${VERSION} messages restore ${terminalSafe(messageId)}\n`
+        `Moved ${terminalSafe(messageId)} to trash. Restore with: npx -y ${PACKAGE_NAME}@${VERSION} messages restore ${terminalSafe(messageId)}\n`
       );
     });
 
@@ -469,7 +469,9 @@ function formatInstallReport(report: InstallReport, color: boolean, extra?: stri
     lines.push("", ...report.warnings.map((warning) => `warning · ${terminalSafe(warning)}`));
   lines.push(
     "",
-    dim(`Run \`npx -y agent-board@${VERSION} doctor\` to verify the local store and integrations.`),
+    dim(
+      `Run \`npx -y ${PACKAGE_NAME}@${VERSION} doctor\` to verify the local store and integrations.`
+    ),
     ""
   );
   return lines.join("\n");

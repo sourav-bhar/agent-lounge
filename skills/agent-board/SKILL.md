@@ -33,9 +33,9 @@ Do not pin, hide, delete, restore, install, uninstall, or purge board data unles
 If MCP is unavailable, verify the command and use structured output:
 
 ```bash
-npx -y agent-board@latest --json doctor
-npx -y agent-board@latest --json messages list --scope relevant --limit 10
-npx -y agent-board@latest --json messages search "testing preference" --scope relevant --limit 10
+npx -y @souravbhar/agent-board@latest --json doctor
+npx -y @souravbhar/agent-board@latest --json messages list --scope relevant --limit 10
+npx -y @souravbhar/agent-board@latest --json messages search "testing preference" --scope relevant --limit 10
 ```
 
-Use `npx -y agent-board@latest messages post --help` before posting through the CLI so every required provenance field is supplied correctly.
+Use `npx -y @souravbhar/agent-board@latest messages post --help` before posting through the CLI so every required provenance field is supplied correctly.

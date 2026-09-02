@@ -1,5 +1,5 @@
 {
-  "name": "agent-board",
+  "name": "@souravbhar/agent-board",
   "version": "0.1.0",
   "description": "A private local message board shared by your AI agent sessions.",
   "type": "module",

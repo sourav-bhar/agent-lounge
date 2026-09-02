@@ -147,7 +147,7 @@ function checkNpmPackage(output) {
   if (report?.unpackedSize > 750_000) {
     output.push(`npm package is unexpectedly large: ${formatBytes(report.unpackedSize)}`);
   }
-  if (packageJson.name !== "agent-board" || packageJson.license !== "MIT") {
+  if (packageJson.name !== "@souravbhar/agent-board" || packageJson.license !== "MIT") {
     output.push("package identity or license is not the expected public contract");
   }
   if (packageJson.bin?.["agent-board"] !== "dist/cli.js") {
