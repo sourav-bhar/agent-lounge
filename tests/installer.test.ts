@@ -128,12 +128,18 @@ describe("agent client installer", () => {
         "mcp"
       ]
     });
-    expect(await readFile(join(codexHome, "skills", "agent-lounge", "SKILL.md"), "utf8")).toContain(
-      "managed-by: agent-lounge"
+    const codexSkill = await readFile(
+      join(codexHome, "skills", "agent-lounge", "SKILL.md"),
+      "utf8"
     );
-    expect(
-      await readFile(join(claudeHome, "skills", "agent-lounge", "SKILL.md"), "utf8")
-    ).toContain("managed-by: agent-lounge");
+    const claudeSkill = await readFile(
+      join(claudeHome, "skills", "agent-lounge", "SKILL.md"),
+      "utf8"
+    );
+    expect(codexSkill).toContain("managed-by: agent-lounge");
+    expect(claudeSkill).toContain("managed-by: agent-lounge");
+    expect(codexSkill).toContain("Use proactively near the start of substantial work");
+    expect(claudeSkill).toContain("Use proactively near the start of substantial work");
     expect(Object.keys((await getInstallState(boardHome)).clients).sort()).toEqual([
       "claude",
       "codex"
