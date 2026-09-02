@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,6 +121,88 @@ describe("managed dashboard process", () => {
     expect(await pathExists(store.paths.uiState)).toBe(false);
   });
 
+  it("rejects a mismatched control identity even when the endpoint returns valid JSON", async () => {
+    const store = await makeStore(false);
+    const instanceId = randomUUID();
+    let responseStatus = 200;
+    let responseBody: unknown = { ok: true, instance_id: randomUUID(), pid: process.pid };
+    const server = createHttpServer((_request, response) => {
+      response.statusCode = responseStatus;
+      response.setHeader("Content-Type", "application/json");
+      response.end(`${JSON.stringify(responseBody)}\n`);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Fixture server has no port.");
+      await writeState(store, { instanceId, pid: process.pid, port: address.port });
+
+      expect(await getManagedUiStatus(store.paths.home)).toMatchObject({
+        state: "stopped",
+        warning: expect.stringMatching(/stale dashboard state/i)
+      });
+      responseBody = { ok: true, instance_id: instanceId, pid: process.pid + 100_000 };
+      await writeState(store, { instanceId, pid: process.pid, port: address.port });
+      expect(await getManagedUiStatus(store.paths.home)).toMatchObject({ state: "stopped" });
+
+      responseStatus = 401;
+      await writeState(store, { instanceId, pid: process.pid, port: address.port });
+      expect(await getManagedUiStatus(store.paths.home)).toMatchObject({ state: "stopped" });
+
+      responseStatus = 200;
+      responseBody = { ok: false };
+      await writeState(store, { instanceId, pid: process.pid, port: address.port });
+      expect(await getManagedUiStatus(store.paths.home)).toMatchObject({ state: "stopped" });
+      expect(process.kill(process.pid, 0)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it("cleans state for a process that already exited", async () => {
+    const store = await makeStore(false);
+    const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore", windowsHide: true });
+    children.push(child);
+    const pid = await new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", () => {
+        if (child.pid) resolve(child.pid);
+        else reject(new Error("Fixture process did not receive a PID."));
+      });
+    });
+
+    await writeState(store, { pid, port: await unusedPort() });
+    expect(await getManagedUiStatus(store.paths.home)).toMatchObject({
+      state: "stopped",
+      warning: expect.stringMatching(/stale dashboard state/i)
+    });
+    await writeState(store, { pid, port: await unusedPort() });
+    expect(await stopManagedUi(store.paths.home)).toMatchObject({
+      stopped: true,
+      was_running: false,
+      warning: expect.stringMatching(/stale dashboard state/i)
+    });
+  });
+
+  it("reports a child startup failure and points to the private UI log", async () => {
+    const store = await makeStore();
+    await expect(
+      startManagedUi({
+        store,
+        port: 0,
+        openBrowser: false,
+        cliPath: path.join(store.paths.home, "missing-cli.js"),
+        nodeArgs: []
+      })
+    ).rejects.toThrow(new RegExp(`exited with status.*${escapeRegExp(store.paths.uiLog)}`, "i"));
+    expect(await getManagedUiStatus(store.paths.home)).toMatchObject({ state: "stopped" });
+  });
+
   it("detects and terminates an unresponsive process only when its identity matches", async () => {
     const store = await makeStore(false);
     const instanceId = randomUUID();
@@ -141,6 +224,15 @@ describe("managed dashboard process", () => {
       running: false,
       pid: child.pid
     });
+    await expect(
+      startManagedUi({
+        store,
+        port: 0,
+        openBrowser: false,
+        cliPath,
+        nodeArgs: ["--import", "tsx"]
+      })
+    ).rejects.toThrow(/unresponsive/i);
     expect(await stopManagedUi(store.paths.home)).toMatchObject({
       stopped: true,
       was_running: true,
@@ -202,7 +294,7 @@ async function waitForState(
 
 function unusedPort(): Promise<number> {
   return new Promise((resolve, reject) => {
-    const server = createServer();
+    const server = createNetServer();
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
@@ -223,4 +315,8 @@ function processIsAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
